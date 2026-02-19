@@ -596,6 +596,7 @@ function App() {
   const [shapeCurrentIndex, setShapeCurrentIndex] = useState(null);
   const [selectedIndices, setSelectedIndices] = useState([]);
   const [clipboard, setClipboard] = useState(null);
+  const [pendingPaste, setPendingPaste] = useState(null);
   const [lastPointerIndex, setLastPointerIndex] = useState(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -621,6 +622,7 @@ function App() {
   const referenceUploadInputRef = useRef(null);
   const customSvAreaRef = useRef(null);
   const undoStackRef = useRef([]);
+  const pendingPasteDragRef = useRef(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -637,6 +639,8 @@ function App() {
       undoStackRef.current = [];
       setSelectedIndices([]);
       setClipboard(null);
+      setPendingPaste(null);
+      pendingPasteDragRef.current = null;
       setReferenceOverlayByProject({});
       setHasHydrated(false);
       setSavedSnapshot("");
@@ -960,7 +964,6 @@ function App() {
       currentTool,
       toolThickness,
       fps,
-      isAnimationPanelOpen,
       isGridVisible,
     }),
     [
@@ -974,7 +977,6 @@ function App() {
     currentTool,
     toolThickness,
     fps,
-    isAnimationPanelOpen,
     isGridVisible,
     ]
   );
@@ -1107,6 +1109,38 @@ function App() {
     toolThickness,
   ]);
 
+  const pendingPastePreviewIndices = useMemo(() => {
+    if (!pendingPaste || !activeProject) return [];
+
+    const indices = [];
+    for (let y = 0; y < pendingPaste.height; y += 1) {
+      for (let x = 0; x < pendingPaste.width; x += 1) {
+        const targetX = pendingPaste.anchorX + x;
+        const targetY = pendingPaste.anchorY + y;
+        if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
+        indices.push(toIndex(targetX, targetY, activeSize));
+      }
+    }
+    return indices;
+  }, [activeProject, activeSize, pendingPaste]);
+
+  const frameWithPendingPaste = useMemo(() => {
+    if (!pendingPaste || !activeProject) return displayFrame;
+
+    const next = [...displayFrame];
+    for (let y = 0; y < pendingPaste.height; y += 1) {
+      for (let x = 0; x < pendingPaste.width; x += 1) {
+        const targetX = pendingPaste.anchorX + x;
+        const targetY = pendingPaste.anchorY + y;
+        if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
+        const sourceIndex = y * pendingPaste.width + x;
+        next[toIndex(targetX, targetY, activeSize)] = pendingPaste.pixels[sourceIndex];
+      }
+    }
+
+    return next;
+  }, [activeProject, activeSize, displayFrame, pendingPaste]);
+
   const selectionPreviewIndices = useMemo(() => {
     if (
       currentTool !== TOOLS.SELECT ||
@@ -1120,7 +1154,12 @@ function App() {
     return getRectFillIndices(shapeStartIndex, shapeCurrentIndex, activeSize);
   }, [activeSize, currentTool, isPainting, shapeStartIndex, shapeCurrentIndex]);
 
-  const visibleSelectionIndices = selectionPreviewIndices.length > 0 ? selectionPreviewIndices : selectedIndices;
+  const visibleSelectionIndices =
+    selectionPreviewIndices.length > 0
+      ? selectionPreviewIndices
+      : pendingPastePreviewIndices.length > 0
+        ? pendingPastePreviewIndices
+        : selectedIndices;
   const selectedIndexSet = useMemo(() => new Set(visibleSelectionIndices), [visibleSelectionIndices]);
 
   const getProjectsBySize = (size) => projectsBySize[size] || [];
@@ -1215,6 +1254,11 @@ function App() {
     }));
   };
 
+  const clampPendingPasteAnchor = (x, y, width, height) => ({
+    x: Math.max(-width + 1, Math.min(activeSize - 1, x)),
+    y: Math.max(-height + 1, Math.min(activeSize - 1, y)),
+  });
+
   const handlePointerDown = (index) => {
     if (!activeProject) return;
 
@@ -1243,6 +1287,26 @@ function App() {
     setLastPointerIndex(index);
     setIsPainting(true);
 
+    if (currentTool === TOOLS.SELECT && pendingPaste) {
+      const pointer = toXY(index, activeSize);
+      const isInsidePendingPaste =
+        pointer.x >= pendingPaste.anchorX &&
+        pointer.x < pendingPaste.anchorX + pendingPaste.width &&
+        pointer.y >= pendingPaste.anchorY &&
+        pointer.y < pendingPaste.anchorY + pendingPaste.height;
+
+      if (isInsidePendingPaste) {
+        pendingPasteDragRef.current = {
+          startPointerX: pointer.x,
+          startPointerY: pointer.y,
+          startAnchorX: pendingPaste.anchorX,
+          startAnchorY: pendingPaste.anchorY,
+        };
+        setIsPainting(false);
+        return;
+      }
+    }
+
     if (currentTool === TOOLS.SELECT) {
       setShapeStartIndex(index);
       setShapeCurrentIndex(index);
@@ -1268,8 +1332,34 @@ function App() {
   };
 
   const handlePointerEnter = (index) => {
-    if (!activeProject || !isPainting) return;
     setLastPointerIndex(index);
+
+    if (!activeProject) return;
+
+    if (pendingPasteDragRef.current && currentTool === TOOLS.SELECT && pendingPaste) {
+      const pointer = toXY(index, activeSize);
+      const drag = pendingPasteDragRef.current;
+      const deltaX = pointer.x - drag.startPointerX;
+      const deltaY = pointer.y - drag.startPointerY;
+      const nextAnchor = clampPendingPasteAnchor(
+        drag.startAnchorX + deltaX,
+        drag.startAnchorY + deltaY,
+        pendingPaste.width,
+        pendingPaste.height
+      );
+      setPendingPaste((previous) =>
+        previous
+          ? {
+              ...previous,
+              anchorX: nextAnchor.x,
+              anchorY: nextAnchor.y,
+            }
+          : previous
+      );
+      return;
+    }
+
+    if (!isPainting) return;
 
     if (currentTool === TOOLS.BRUSH || currentTool === TOOLS.ERASER) {
       paintPixels(getBrushStampIndices(index, activeSize, toolThickness));
@@ -1300,6 +1390,8 @@ function App() {
 
   useEffect(() => {
     setSelectedIndices([]);
+    setPendingPaste(null);
+    pendingPasteDragRef.current = null;
   }, [activeProjectId, activeFrameIndex]);
 
   const commitShape = (endIndex) => {
@@ -1314,6 +1406,11 @@ function App() {
   const handlePointerUp = (index) => {
     if (index !== undefined && index !== null) {
       setLastPointerIndex(index);
+    }
+
+    if (pendingPasteDragRef.current) {
+      pendingPasteDragRef.current = null;
+      return;
     }
 
     if (isPainting && currentTool === TOOLS.SELECT) {
@@ -1336,6 +1433,19 @@ function App() {
     setShapeCurrentIndex(null);
     setIsPainting(false);
   };
+
+  useEffect(() => {
+    const stopPendingPasteDrag = () => {
+      pendingPasteDragRef.current = null;
+    };
+
+    window.addEventListener("pointerup", stopPendingPasteDrag);
+    window.addEventListener("pointercancel", stopPendingPasteDrag);
+    return () => {
+      window.removeEventListener("pointerup", stopPendingPasteDrag);
+      window.removeEventListener("pointercancel", stopPendingPasteDrag);
+    };
+  }, []);
 
   const addFrame = () => {
     if (!activeProject) return;
@@ -1797,6 +1907,15 @@ function App() {
   };
 
   const copySelection = () => {
+    if (pendingPaste) {
+      setClipboard({
+        width: pendingPaste.width,
+        height: pendingPaste.height,
+        pixels: [...pendingPaste.pixels],
+      });
+      return;
+    }
+
     if (!activeProject || selectedIndices.length === 0) return;
 
     const bounds = getSelectionBounds(selectedIndices);
@@ -1820,23 +1939,41 @@ function App() {
 
     const anchorIndex = lastPointerIndex ?? selectedIndices[0] ?? 0;
     const anchor = toXY(anchorIndex, activeSize);
+    const clampedAnchor = clampPendingPasteAnchor(anchor.x, anchor.y, clipboard.width, clipboard.height);
+
+    setPendingPaste({
+      width: clipboard.width,
+      height: clipboard.height,
+      pixels: [...clipboard.pixels],
+      anchorX: clampedAnchor.x,
+      anchorY: clampedAnchor.y,
+    });
+    setCurrentTool(TOOLS.SELECT);
+  };
+
+  const commitPendingPaste = () => {
+    if (!activeProject || !pendingPaste) return;
     pushUndoSnapshot();
 
     updateActiveFrame((framePixels) => {
       const next = [...framePixels];
 
-      for (let y = 0; y < clipboard.height; y += 1) {
-        for (let x = 0; x < clipboard.width; x += 1) {
-          const targetX = anchor.x + x;
-          const targetY = anchor.y + y;
+      for (let y = 0; y < pendingPaste.height; y += 1) {
+        for (let x = 0; x < pendingPaste.width; x += 1) {
+          const targetX = pendingPaste.anchorX + x;
+          const targetY = pendingPaste.anchorY + y;
           if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
-          const sourceIndex = y * clipboard.width + x;
-          next[toIndex(targetX, targetY, activeSize)] = clipboard.pixels[sourceIndex];
+          const sourceIndex = y * pendingPaste.width + x;
+          next[toIndex(targetX, targetY, activeSize)] = pendingPaste.pixels[sourceIndex];
         }
       }
 
       return next;
     });
+
+    setSelectedIndices(pendingPastePreviewIndices);
+    setPendingPaste(null);
+    pendingPasteDragRef.current = null;
   };
 
   useEffect(() => {
@@ -1848,6 +1985,20 @@ function App() {
 
     const onKeyDown = (event) => {
       if (!authUser || isEditableTarget(event.target)) return;
+
+      if (event.key === "Enter" && pendingPaste) {
+        event.preventDefault();
+        commitPendingPaste();
+        return;
+      }
+
+      if (event.key === "Escape" && pendingPaste) {
+        event.preventDefault();
+        setPendingPaste(null);
+        pendingPasteDragRef.current = null;
+        return;
+      }
+
       const commandKey = event.metaKey || event.ctrlKey;
       if (!commandKey) return;
 
@@ -1872,7 +2023,7 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [authUser, copySelection, pasteClipboard]);
+  }, [authUser, commitPendingPaste, copySelection, pasteClipboard, pendingPaste]);
 
   const signInWithGoogle = async () => {
     try {
@@ -2290,7 +2441,7 @@ function App() {
           <EditorPanel
             activeProject={activeProject}
             projectCount={allProjects.length}
-            activeFrame={displayFrame}
+            activeFrame={frameWithPendingPaste}
             selectedIndices={selectedIndexSet}
             activeFrameIndex={activeFrameIndex}
             isGridVisible={isGridVisible}
