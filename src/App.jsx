@@ -31,6 +31,7 @@ import {
   PaintBucket,
   Pencil,
   Grid3x3,
+  Clapperboard,
   Save,
   Square,
 } from "lucide-react";
@@ -1313,8 +1314,19 @@ function App() {
     }));
   };
 
-  const deleteFrame = (frameIndex) => {
+  const deleteFrames = (frameIndices) => {
     if (!activeProject) return;
+    const sourceFrames = Array.isArray(activeProject.frames) ? activeProject.frames : [];
+    if (sourceFrames.length <= 1) return;
+
+    const uniqueRequested = [...new Set(Array.isArray(frameIndices) ? frameIndices : [])]
+      .filter((index) => Number.isInteger(index) && index >= 0 && index < sourceFrames.length)
+      .sort((a, b) => b - a);
+
+    const maxDeletions = Math.max(0, sourceFrames.length - 1);
+    const deletions = uniqueRequested.slice(0, maxDeletions);
+    if (deletions.length === 0) return;
+
     pushUndoSnapshot();
 
     const projectId = activeProject.id;
@@ -1325,18 +1337,25 @@ function App() {
       if (project.id !== projectId) return project;
 
       const frames = [...project.frames];
-      if (frames.length <= 1) {
-        frames[0] = createBlankPixels(project.size);
+      const validDeletions = deletions.filter((index) => index >= 0 && index < frames.length);
+      if (validDeletions.length === 0) return project;
+
+      const ascending = [...validDeletions].sort((a, b) => a - b);
+      const removedBeforeCurrent = ascending.filter((index) => index < currentIndex).length;
+      const deletedCurrent = ascending.includes(currentIndex);
+
+      validDeletions.forEach((index) => {
+        if (index >= 0 && index < frames.length) frames.splice(index, 1);
+      });
+
+      if (frames.length <= 0) {
+        frames.push(createBlankPixels(project.size));
         nextFrameIndex = 0;
-        return { ...project, frames };
-      }
-
-      frames.splice(frameIndex, 1);
-
-      if (frameIndex < currentIndex) {
-        nextFrameIndex = currentIndex - 1;
-      } else if (frameIndex === currentIndex) {
-        nextFrameIndex = Math.max(0, Math.min(currentIndex, frames.length - 1));
+      } else if (deletedCurrent) {
+        const candidate = currentIndex - removedBeforeCurrent;
+        nextFrameIndex = Math.max(0, Math.min(candidate, frames.length - 1));
+      } else {
+        nextFrameIndex = Math.max(0, Math.min(currentIndex - removedBeforeCurrent, frames.length - 1));
       }
 
       return { ...project, frames };
@@ -1350,6 +1369,10 @@ function App() {
       ...prev,
       [projectId]: nextFrameIndex,
     }));
+  };
+
+  const deleteFrame = (frameIndex) => {
+    deleteFrames([frameIndex]);
   };
 
   const getUniqueName = (size, baseName) => {
@@ -1504,6 +1527,7 @@ function App() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    setCurrentTool(TOOLS.SELECT);
 
     const reader = new FileReader();
     reader.onload = () => {
@@ -2166,6 +2190,14 @@ function App() {
               ariaLabel={isGridVisible ? "Hide grid" : "Show grid"}
               onClick={() => setIsGridVisible((prev) => !prev)}
             />
+            <IconActionButton
+              icon={Clapperboard}
+              iconSize={16}
+              isActive={isAnimationPanelOpen}
+              title={isAnimationPanelOpen ? "Hide animation drawer" : "Show animation drawer"}
+              ariaLabel={isAnimationPanelOpen ? "Hide animation drawer" : "Show animation drawer"}
+              onClick={() => setIsAnimationPanelOpen((prev) => !prev)}
+            />
           </div>
           <div className="icon-action-toolbar-right">
             <IconActionButton
@@ -2215,6 +2247,10 @@ function App() {
             onDeleteFrame={(index) => {
               setIsAnimationPlaying(false);
               deleteFrame(index);
+            }}
+            onDeleteFrames={(indices) => {
+              setIsAnimationPlaying(false);
+              deleteFrames(indices);
             }}
             referenceImage={activeProject ? referenceOverlayByProject[activeProject.id]?.src : ""}
             referenceOpacity={activeProject ? referenceOverlayByProject[activeProject.id]?.opacity ?? 0.5 : 0.5}

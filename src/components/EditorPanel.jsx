@@ -32,6 +32,7 @@ function EditorPanel({
   onFpsChange,
   onSelectFrame,
   onDeleteFrame,
+  onDeleteFrames,
   referenceImage,
   referenceOpacity,
   referenceTransform,
@@ -142,6 +143,11 @@ function EditorPanel({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isReferenceAdjustMode, referenceImage]);
+
+  useEffect(() => {
+    if (isPointerToolActive) return;
+    setIsReferenceAdjustMode(false);
+  }, [isPointerToolActive]);
 
   useEffect(() => {
     const scrollContainer = canvasScrollRef.current;
@@ -486,6 +492,7 @@ function EditorPanel({
             onFpsChange={onFpsChange}
             onSelectFrame={onSelectFrame}
             onDeleteFrame={onDeleteFrame}
+            onDeleteFrames={onDeleteFrames}
           />
         )}
       </div>
