@@ -10,9 +10,6 @@ export default defineConfig({
           if (!id.includes("node_modules")) return;
 
           if (id.includes("/firebase/") || id.includes("@firebase/")) {
-            if (id.includes("/firestore/")) return "vendor-firebase-firestore";
-            if (id.includes("/auth/")) return "vendor-firebase-auth";
-            if (id.includes("/app/")) return "vendor-firebase-app";
             return "vendor-firebase";
           }
 
