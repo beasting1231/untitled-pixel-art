@@ -1,0 +1,1731 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
+import {
+  arrayRemove,
+  arrayUnion,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  runTransaction,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
+import AppHeader from "./components/AppHeader";
+import CreateFileModal from "./components/CreateFileModal";
+import EditorPanel from "./components/EditorPanel";
+import HomePage from "./components/HomePage";
+import PalettePanel from "./components/PalettePanel";
+import { auth, db } from "./lib/firebase";
+import {
+  BASE_PALETTE,
+  CANVAS_SIZES,
+  TRANSPARENT,
+  buildCurBlob,
+  buildGifBlob,
+  buildJsonBlob,
+  buildPngBlob,
+  buildSpriteSheetPngBlob,
+  createBlankPixels,
+  createEmptyProjectsBySize,
+  createProject,
+} from "./lib/pixelEditor";
+
+const TOOLS = {
+  SELECT: "select",
+  BRUSH: "brush",
+  ERASER: "eraser",
+  LINE: "line",
+  SQUARE: "square",
+  BUCKET: "bucket",
+};
+
+const STORAGE_VERSION = 1;
+const STORAGE_KEY_PREFIX = "pixel-forge-state";
+const COMMUNITY_COLLECTION = "communityProjects";
+const MAX_COMMUNITY_PREVIEW_FRAMES = 12;
+const MIN_BRUSH_SIZE = 1;
+const MAX_BRUSH_SIZE = 5;
+const DEFAULT_REFERENCE_TRANSFORM = {
+  x: 0,
+  y: 0,
+  width: 100,
+  height: 100,
+  rotation: 360,
+  layer: "behind",
+};
+
+const toXY = (index, size) => ({ x: index % size, y: Math.floor(index / size) });
+const toIndex = (x, y, size) => y * size + x;
+const getStorageKey = (uid) => `${STORAGE_KEY_PREFIX}:${uid}`;
+const getUserStateRef = (uid) => doc(db, "users", uid, "editorState", "pixelForge");
+const getProjectPreviewPixels = (project) =>
+  Array.isArray(project?.frames?.[0]) ? project.frames[0] : [];
+const getProjectPreviewFrameStrings = (project) => {
+  if (!Array.isArray(project?.frames)) return [];
+  return project.frames
+    .filter((frame) => Array.isArray(frame))
+    .slice(0, MAX_COMMUNITY_PREVIEW_FRAMES)
+    .map((frame) => JSON.stringify(frame));
+};
+
+const parsePreviewFrameStrings = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry !== "string") return null;
+      try {
+        const parsed = JSON.parse(entry);
+        return Array.isArray(parsed) ? parsed : null;
+      } catch (_error) {
+        return null;
+      }
+    })
+    .filter((frame) => Array.isArray(frame));
+};
+
+const parseFrameStrings = (value) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry !== "string") return null;
+      try {
+        const parsed = JSON.parse(entry);
+        return Array.isArray(parsed) ? parsed : null;
+      } catch (_error) {
+        return null;
+      }
+    })
+    .filter((frame) => Array.isArray(frame));
+};
+
+const clampReferenceTransform = (transform) => {
+  const source = transform && typeof transform === "object" ? transform : {};
+  const layer = source.layer === "top" ? "top" : "behind";
+  return {
+    x: Math.max(-100, Math.min(100, Number(source.x) || 0)),
+    y: Math.max(-100, Math.min(100, Number(source.y) || 0)),
+    width: Math.max(5, Math.min(300, Number(source.width) || DEFAULT_REFERENCE_TRANSFORM.width)),
+    height: Math.max(5, Math.min(300, Number(source.height) || DEFAULT_REFERENCE_TRANSFORM.height)),
+    rotation: Math.max(1, Math.min(360, Number(source.rotation) || DEFAULT_REFERENCE_TRANSFORM.rotation)),
+    layer,
+  };
+};
+
+const getReferenceFitTransform = (imageWidth, imageHeight) => {
+  const safeWidth = Math.max(1, Number(imageWidth) || 1);
+  const safeHeight = Math.max(1, Number(imageHeight) || 1);
+  const aspectRatio = safeWidth / safeHeight;
+
+  if (aspectRatio >= 1) {
+    return {
+      ...DEFAULT_REFERENCE_TRANSFORM,
+      width: 100,
+      height: 100 / aspectRatio,
+    };
+  }
+
+  return {
+    ...DEFAULT_REFERENCE_TRANSFORM,
+    width: 100 * aspectRatio,
+    height: 100,
+  };
+};
+
+const prepareStateForStorage = (state) => {
+  if (!state || typeof state !== "object") return state;
+  const sourceProjectsBySize = state.projectsBySize || {};
+  const nextProjectsBySize = {};
+
+  CANVAS_SIZES.forEach((size) => {
+    const projects = Array.isArray(sourceProjectsBySize[size]) ? sourceProjectsBySize[size] : [];
+    nextProjectsBySize[size] = projects.map((project) => {
+      const frames = Array.isArray(project.frames) ? project.frames : [];
+      const frameStrings = frames
+        .filter((frame) => Array.isArray(frame))
+        .map((frame) => JSON.stringify(frame));
+      const { frames: _frames, ...projectWithoutFrames } = project;
+
+      return {
+        ...projectWithoutFrames,
+        frameStrings,
+      };
+    });
+  });
+
+  return {
+    ...state,
+    projectsBySize: nextProjectsBySize,
+  };
+};
+
+const normalizeProjectsBySize = (value) => {
+  const normalized = createEmptyProjectsBySize();
+  if (!value || typeof value !== "object") return normalized;
+
+  CANVAS_SIZES.forEach((size) => {
+    const rawProjects = Array.isArray(value[size]) ? value[size] : [];
+    normalized[size] = rawProjects
+      .filter(
+        (project) =>
+          project &&
+          typeof project.id === "string" &&
+          typeof project.name === "string" &&
+          Number(project.size) === size &&
+          (Array.isArray(project.frames) || Array.isArray(project.frameStrings))
+      )
+      .map((project) => {
+        const expectedLength = size * size;
+        const rawFramesFromStrings = parseFrameStrings(project.frameStrings);
+        const rawFrames =
+          rawFramesFromStrings.length > 0
+            ? rawFramesFromStrings
+            : Array.isArray(project.frames)
+              ? project.frames
+              : [];
+        const frames =
+          rawFrames.length > 0
+            ? rawFrames
+                .filter((frame) => Array.isArray(frame))
+                .map((frame) =>
+                  Array.from({ length: expectedLength }, (_, index) => frame[index] || TRANSPARENT)
+                )
+            : [createBlankPixels(size)];
+
+        return {
+          id: project.id,
+          name: project.name,
+          size,
+          frames: frames.length > 0 ? frames : [createBlankPixels(size)],
+        };
+      });
+  });
+
+  return normalized;
+};
+
+const getLineIndices = (startIndex, endIndex, size) => {
+  const start = toXY(startIndex, size);
+  const end = toXY(endIndex, size);
+  const result = [];
+
+  let x0 = start.x;
+  let y0 = start.y;
+  const x1 = end.x;
+  const y1 = end.y;
+  const dx = Math.abs(x1 - x0);
+  const sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0);
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+
+  while (true) {
+    result.push(toIndex(x0, y0, size));
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+
+  return result;
+};
+
+const getSquareOutlineIndices = (startIndex, endIndex, size) => {
+  const start = toXY(startIndex, size);
+  const end = toXY(endIndex, size);
+  const minX = Math.min(start.x, end.x);
+  const maxX = Math.max(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const maxY = Math.max(start.y, end.y);
+
+  const indices = new Set();
+
+  for (let x = minX; x <= maxX; x += 1) {
+    indices.add(toIndex(x, minY, size));
+    indices.add(toIndex(x, maxY, size));
+  }
+
+  for (let y = minY; y <= maxY; y += 1) {
+    indices.add(toIndex(minX, y, size));
+    indices.add(toIndex(maxX, y, size));
+  }
+
+  return [...indices];
+};
+
+const getRectFillIndices = (startIndex, endIndex, size) => {
+  const start = toXY(startIndex, size);
+  const end = toXY(endIndex, size);
+  const minX = Math.min(start.x, end.x);
+  const maxX = Math.max(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const maxY = Math.max(start.y, end.y);
+  const indices = [];
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      indices.push(toIndex(x, y, size));
+    }
+  }
+
+  return indices;
+};
+
+const BRUSH_RADIUS_BY_SIZE = {
+  1: 0,
+  2: 1,
+  3: 2,
+  4: 2.6,
+  5: 3.4,
+};
+
+const clampBrushSize = (value) =>
+  Math.max(MIN_BRUSH_SIZE, Math.min(MAX_BRUSH_SIZE, Number(value) || MIN_BRUSH_SIZE));
+
+const getBrushStampIndices = (centerIndex, size, thickness) => {
+  const center = toXY(centerIndex, size);
+  const brushSize = clampBrushSize(thickness);
+  const radius = BRUSH_RADIUS_BY_SIZE[brushSize];
+  if (radius <= 0) return [centerIndex];
+
+  const searchRadius = Math.ceil(radius);
+  const minX = Math.max(0, center.x - searchRadius);
+  const maxX = Math.min(size - 1, center.x + searchRadius);
+  const minY = Math.max(0, center.y - searchRadius);
+  const maxY = Math.min(size - 1, center.y + searchRadius);
+  const radiusSquared = radius * radius;
+
+  const indices = [];
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x - center.x;
+      const dy = y - center.y;
+      if (dx * dx + dy * dy <= radiusSquared) {
+        indices.push(toIndex(x, y, size));
+      }
+    }
+  }
+
+  return indices;
+};
+
+const expandIndicesWithThickness = (indices, size, thickness) => {
+  if (thickness <= 1) return [...new Set(indices)];
+
+  const expanded = new Set(indices);
+  indices.forEach((index) => {
+    const stamp = getBrushStampIndices(index, size, thickness);
+    stamp.forEach((pixelIndex) => expanded.add(pixelIndex));
+  });
+
+  return [...expanded];
+};
+
+const floodFill = (pixels, startIndex, replacement, size) => {
+  const target = pixels[startIndex];
+  if (target === replacement) return pixels;
+
+  const next = [...pixels];
+  const queue = [startIndex];
+  const seen = new Set([startIndex]);
+
+  while (queue.length > 0) {
+    const index = queue.shift();
+    if (next[index] !== target) continue;
+    next[index] = replacement;
+
+    const { x, y } = toXY(index, size);
+    const neighbors = [];
+    if (x > 0) neighbors.push(toIndex(x - 1, y, size));
+    if (x < size - 1) neighbors.push(toIndex(x + 1, y, size));
+    if (y > 0) neighbors.push(toIndex(x, y - 1, size));
+    if (y < size - 1) neighbors.push(toIndex(x, y + 1, size));
+
+    neighbors.forEach((n) => {
+      if (!seen.has(n) && next[n] === target) {
+        seen.add(n);
+        queue.push(n);
+      }
+    });
+  }
+
+  return next;
+};
+
+function App() {
+  const [authUser, setAuthUser] = useState(null);
+  const [currentView, setCurrentView] = useState("home");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [projectsBySize, setProjectsBySize] = useState(createEmptyProjectsBySize);
+  const [activeProjectId, setActiveProjectId] = useState(null);
+  const [activeFrameIndexByProject, setActiveFrameIndexByProject] = useState({});
+  const [palette, setPalette] = useState(BASE_PALETTE);
+  const [brushColor, setBrushColor] = useState(BASE_PALETTE[0]);
+  const [pickerColor, setPickerColor] = useState(BASE_PALETTE[0]);
+  const [currentTool, setCurrentTool] = useState(TOOLS.BRUSH);
+  const [toolThickness, setToolThickness] = useState(1);
+  const [shapeStartIndex, setShapeStartIndex] = useState(null);
+  const [shapeCurrentIndex, setShapeCurrentIndex] = useState(null);
+  const [selectedIndices, setSelectedIndices] = useState([]);
+  const [clipboard, setClipboard] = useState(null);
+  const [lastPointerIndex, setLastPointerIndex] = useState(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectSize, setNewProjectSize] = useState(CANVAS_SIZES[0]);
+  const [referenceOverlayByProject, setReferenceOverlayByProject] = useState({});
+  const [isPainting, setIsPainting] = useState(false);
+  const [isAnimationPanelOpen, setIsAnimationPanelOpen] = useState(false);
+  const [isAnimationPlaying, setIsAnimationPlaying] = useState(false);
+  const [isGridVisible, setIsGridVisible] = useState(true);
+  const [fps, setFps] = useState(8);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [savedSnapshot, setSavedSnapshot] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveState, setSaveState] = useState("idle");
+  const [communityProjects, setCommunityProjects] = useState([]);
+  const [communityLoading, setCommunityLoading] = useState(false);
+  const [communityError, setCommunityError] = useState("");
+  const [publishedProjectIds, setPublishedProjectIds] = useState(new Set());
+  const [projectCommunityLikes, setProjectCommunityLikes] = useState({});
+  const [missingPreviewProjectIds, setMissingPreviewProjectIds] = useState(new Set());
+  const [publishingProjectId, setPublishingProjectId] = useState(null);
+  const undoStackRef = useRef([]);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!authUser?.uid) {
+      setCurrentView("home");
+      undoStackRef.current = [];
+      setSelectedIndices([]);
+      setClipboard(null);
+      setReferenceOverlayByProject({});
+      setHasHydrated(false);
+      setSavedSnapshot("");
+      setIsSaving(false);
+      setSaveState("idle");
+      return;
+    }
+
+    setCurrentView("home");
+    let isCancelled = false;
+
+    const applyPersistedState = (state) => {
+      if (!state || isCancelled) return;
+      const nextProjectsBySize = normalizeProjectsBySize(state.projectsBySize);
+      const allLoadedProjects = Object.values(nextProjectsBySize).flat();
+      const loadedProjectIds = new Set(allLoadedProjects.map((project) => project.id));
+      const loadedActiveProjectId =
+        typeof state.activeProjectId === "string" && loadedProjectIds.has(state.activeProjectId)
+          ? state.activeProjectId
+          : null;
+
+      setProjectsBySize(nextProjectsBySize);
+      setActiveProjectId(loadedActiveProjectId);
+      setActiveFrameIndexByProject(
+        state.activeFrameIndexByProject && typeof state.activeFrameIndexByProject === "object"
+          ? state.activeFrameIndexByProject
+          : {}
+      );
+      setPalette(Array.isArray(state.palette) ? state.palette : BASE_PALETTE);
+      setBrushColor(typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0]);
+      setPickerColor(typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0]);
+      setCurrentTool(Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH);
+      setToolThickness(clampBrushSize(state.toolThickness));
+      setFps(Math.max(1, Math.min(60, Number(state.fps) || 8)));
+      setIsAnimationPanelOpen(Boolean(state.isAnimationPanelOpen));
+      setIsGridVisible(state.isGridVisible !== false);
+
+      return {
+        projectsBySize: nextProjectsBySize,
+        activeProjectId: loadedActiveProjectId,
+        activeFrameIndexByProject:
+          state.activeFrameIndexByProject && typeof state.activeFrameIndexByProject === "object"
+            ? state.activeFrameIndexByProject
+            : {},
+        palette: Array.isArray(state.palette) ? state.palette : BASE_PALETTE,
+        brushColor: typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0],
+        pickerColor: typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0],
+        currentTool: Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH,
+        toolThickness: clampBrushSize(state.toolThickness),
+        fps: Math.max(1, Math.min(60, Number(state.fps) || 8)),
+        isAnimationPanelOpen: Boolean(state.isAnimationPanelOpen),
+        isGridVisible: state.isGridVisible !== false,
+      };
+    };
+
+    const hydrateFromPersistence = async () => {
+      const stateRef = getUserStateRef(authUser.uid);
+      let persistedState = null;
+
+      try {
+        const snapshot = await getDoc(stateRef);
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          persistedState = data?.state || null;
+        }
+      } catch (_error) {
+        // Ignore read errors and fallback to defaults/local migration.
+      }
+
+      if (!persistedState) {
+        try {
+          const raw = localStorage.getItem(getStorageKey(authUser.uid));
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.version === STORAGE_VERSION && parsed.state) {
+              persistedState = parsed.state;
+              await setDoc(
+                stateRef,
+                {
+                  version: STORAGE_VERSION,
+                  state: persistedState,
+                  updatedAt: Date.now(),
+                },
+                { merge: true }
+              );
+            }
+          }
+        } catch (_error) {
+          // Ignore migration errors.
+        }
+      }
+
+      if (!isCancelled && persistedState) {
+        const normalizedPersistedState = applyPersistedState(persistedState);
+        if (normalizedPersistedState) {
+          setSavedSnapshot(JSON.stringify(normalizedPersistedState));
+          setSaveState("saved");
+        }
+      }
+
+      if (!isCancelled && !persistedState) {
+        const defaultState = {
+          projectsBySize: createEmptyProjectsBySize(),
+          activeProjectId: null,
+          activeFrameIndexByProject: {},
+          palette: BASE_PALETTE,
+          brushColor: BASE_PALETTE[0],
+          pickerColor: BASE_PALETTE[0],
+          currentTool: TOOLS.BRUSH,
+          toolThickness: 1,
+          fps: 8,
+          isAnimationPanelOpen: false,
+          isGridVisible: true,
+        };
+        setSavedSnapshot(JSON.stringify(defaultState));
+        setSaveState("saved");
+      }
+
+      if (!isCancelled) {
+        setHasHydrated(true);
+      }
+    };
+
+    hydrateFromPersistence();
+    return () => {
+      isCancelled = true;
+    };
+  }, [authUser]);
+
+  useEffect(() => {
+    const onWheel = (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+    };
+
+    const onKeyDown = (event) => {
+      const commandKey = event.metaKey || event.ctrlKey;
+      if (!commandKey) return;
+      if (["+", "=", "-", "_", "0"].includes(event.key)) {
+        event.preventDefault();
+      }
+    };
+
+    const preventGestureZoom = (event) => event.preventDefault();
+
+    window.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    window.addEventListener("gesturestart", preventGestureZoom, { passive: false, capture: true });
+    window.addEventListener("gesturechange", preventGestureZoom, { passive: false, capture: true });
+    window.addEventListener("gestureend", preventGestureZoom, { passive: false, capture: true });
+    document.addEventListener("gesturestart", preventGestureZoom, { passive: false, capture: true });
+    document.addEventListener("gesturechange", preventGestureZoom, { passive: false, capture: true });
+    document.addEventListener("gestureend", preventGestureZoom, { passive: false, capture: true });
+
+    return () => {
+      window.removeEventListener("wheel", onWheel, { capture: true });
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+      window.removeEventListener("gesturestart", preventGestureZoom, { capture: true });
+      window.removeEventListener("gesturechange", preventGestureZoom, { capture: true });
+      window.removeEventListener("gestureend", preventGestureZoom, { capture: true });
+      document.removeEventListener("gesturestart", preventGestureZoom, { capture: true });
+      document.removeEventListener("gesturechange", preventGestureZoom, { capture: true });
+      document.removeEventListener("gestureend", preventGestureZoom, { capture: true });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authUser?.uid) {
+      setCommunityProjects([]);
+      setPublishedProjectIds(new Set());
+      setProjectCommunityLikes({});
+      setMissingPreviewProjectIds(new Set());
+      setCommunityError("");
+      setCommunityLoading(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setCommunityLoading(true);
+    setCommunityError("");
+
+    const loadCommunityProjects = async () => {
+      try {
+        const communityQuery = query(
+          collection(db, COMMUNITY_COLLECTION),
+          orderBy("upvotes", "desc"),
+          limit(50)
+        );
+        const ownPublishedQuery = query(
+          collection(db, COMMUNITY_COLLECTION),
+          where("ownerUid", "==", authUser.uid),
+          limit(100)
+        );
+
+        const [communitySnapshot, ownSnapshot] = await Promise.all([
+          getDocs(communityQuery),
+          getDocs(ownPublishedQuery),
+        ]);
+
+        if (isCancelled) return;
+
+        const nextProjects = communitySnapshot.docs
+          .map((projectDoc) => {
+            const data = projectDoc.data() || {};
+            const upvoterIds = Array.isArray(data.upvoterIds) ? data.upvoterIds : [];
+            return {
+              id: projectDoc.id,
+              name: typeof data.name === "string" ? data.name : "Untitled Project",
+              ownerUid: typeof data.ownerUid === "string" ? data.ownerUid : "",
+              authorName: typeof data.authorName === "string" ? data.authorName : "Unknown creator",
+              size: Number(data.size) || 16,
+              frameCount: Math.max(1, Number(data.frameCount) || 1),
+              previewPixels: Array.isArray(data.previewPixels) ? data.previewPixels : [],
+              previewFrames: parsePreviewFrameStrings(data.previewFrameStrings),
+              upvotes: Math.max(0, Number(data.upvotes) || 0),
+              hasUpvoted: upvoterIds.includes(authUser.uid),
+            };
+          })
+          .filter((project) => project.ownerUid && project.ownerUid !== authUser.uid)
+          .sort((a, b) => b.upvotes - a.upvotes);
+
+        const ownedIds = new Set();
+        const likesByProjectId = {};
+        const missingPreviewIds = new Set();
+        ownSnapshot.docs.forEach((docSnapshot) => {
+          const rawId = docSnapshot.id || "";
+          const prefix = `${authUser.uid}_`;
+          if (rawId.startsWith(prefix)) {
+            const projectId = rawId.slice(prefix.length);
+            ownedIds.add(projectId);
+            const data = docSnapshot.data() || {};
+            likesByProjectId[projectId] = Math.max(0, Number(data.upvotes) || 0);
+            const frameCount = Math.max(1, Number(data.frameCount) || 1);
+            const hasPreviewPixels = Array.isArray(data.previewPixels) && data.previewPixels.length > 0;
+            const hasAnimatedPreviewFrames =
+              Array.isArray(data.previewFrameStrings) &&
+              data.previewFrameStrings.filter((entry) => typeof entry === "string").length >= 2;
+            const needsStaticPreview = !hasPreviewPixels;
+            const needsAnimatedPreview = frameCount > 1 && !hasAnimatedPreviewFrames;
+
+            if (needsStaticPreview || needsAnimatedPreview) {
+              missingPreviewIds.add(projectId);
+            }
+          }
+        });
+
+        setCommunityProjects(nextProjects);
+        setPublishedProjectIds(ownedIds);
+        setProjectCommunityLikes(likesByProjectId);
+        setMissingPreviewProjectIds(missingPreviewIds);
+      } catch (_error) {
+        if (!isCancelled) {
+          setCommunityError("Could not load community projects.");
+        }
+      } finally {
+        if (!isCancelled) {
+          setCommunityLoading(false);
+        }
+      }
+    };
+
+    loadCommunityProjects();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [authUser]);
+
+  const allProjects = useMemo(() => Object.values(projectsBySize).flat(), [projectsBySize]);
+
+  useEffect(() => {
+    if (!authUser?.uid || !hasHydrated || missingPreviewProjectIds.size === 0) return;
+
+    const idsToBackfill = [...missingPreviewProjectIds];
+    const updates = idsToBackfill
+      .map((projectId) => {
+        const project = allProjects.find((entry) => entry.id === projectId);
+        if (!project) return null;
+        return {
+          projectId,
+          ref: doc(db, COMMUNITY_COLLECTION, `${authUser.uid}_${projectId}`),
+          data: {
+            previewPixels: getProjectPreviewPixels(project),
+            previewFrameStrings: getProjectPreviewFrameStrings(project),
+            frameCount: project.frames?.length || 1,
+            size: project.size,
+            updatedAt: serverTimestamp(),
+          },
+        };
+      })
+      .filter(Boolean);
+
+    if (updates.length === 0) return;
+
+    Promise.all(updates.map((entry) => setDoc(entry.ref, entry.data, { merge: true })))
+      .then(() => {
+        setMissingPreviewProjectIds((prev) => {
+          const next = new Set(prev);
+          updates.forEach((entry) => next.delete(entry.projectId));
+          return next;
+        });
+      })
+      .catch(() => {
+        // Best-effort backfill. If it fails, we'll retry on next load.
+      });
+  }, [authUser, hasHydrated, missingPreviewProjectIds, allProjects]);
+
+  const persistedState = useMemo(
+    () => ({
+      projectsBySize,
+      activeProjectId,
+      activeFrameIndexByProject,
+      palette,
+      brushColor,
+      pickerColor,
+      currentTool,
+      toolThickness,
+      fps,
+      isAnimationPanelOpen,
+      isGridVisible,
+    }),
+    [
+    projectsBySize,
+    activeProjectId,
+    activeFrameIndexByProject,
+    palette,
+    brushColor,
+    pickerColor,
+    currentTool,
+    toolThickness,
+    fps,
+    isAnimationPanelOpen,
+    isGridVisible,
+    ]
+  );
+
+  const currentSnapshot = useMemo(() => JSON.stringify(persistedState), [persistedState]);
+  const hasUnsavedChanges = hasHydrated && currentSnapshot !== savedSnapshot;
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    if (hasUnsavedChanges && !isSaving) {
+      setSaveState("idle");
+    }
+  }, [hasHydrated, hasUnsavedChanges, isSaving]);
+
+  const saveChanges = async () => {
+    if (!authUser?.uid || !hasHydrated || isSaving || !hasUnsavedChanges) return;
+
+    setIsSaving(true);
+    setSaveState("saving");
+    try {
+      const payload = {
+        version: STORAGE_VERSION,
+        state: prepareStateForStorage(persistedState),
+        updatedAt: Date.now(),
+      };
+      await setDoc(getUserStateRef(authUser.uid), payload, { merge: true });
+      setSavedSnapshot(currentSnapshot);
+      setAuthError("");
+      setSaveState("saved");
+    } catch (error) {
+      setAuthError(error?.message || "Save failed. Please try again.");
+      setSaveState("error");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const activeProject = useMemo(
+    () => allProjects.find((project) => project.id === activeProjectId) || null,
+    [allProjects, activeProjectId]
+  );
+
+  const activeSize = activeProject?.size || CANVAS_SIZES[0];
+
+  const activeFrameIndex = activeProject
+    ? Math.min(
+        activeFrameIndexByProject[activeProject.id] || 0,
+        Math.max((activeProject.frames?.length || 1) - 1, 0)
+      )
+    : 0;
+
+  const activeFrame = activeProject?.frames?.[activeFrameIndex] || createBlankPixels(activeSize);
+  const colorForTool = currentTool === TOOLS.ERASER ? TRANSPARENT : brushColor;
+  const displayFrame = useMemo(() => {
+    const isPreviewTool = currentTool === TOOLS.LINE || currentTool === TOOLS.SQUARE;
+    if (!isPainting || !isPreviewTool || shapeStartIndex === null || shapeCurrentIndex === null) {
+      return activeFrame;
+    }
+
+    const baseIndices =
+      currentTool === TOOLS.LINE
+        ? getLineIndices(shapeStartIndex, shapeCurrentIndex, activeSize)
+        : getSquareOutlineIndices(shapeStartIndex, shapeCurrentIndex, activeSize);
+
+    const indices = expandIndicesWithThickness(baseIndices, activeSize, toolThickness);
+    const next = [...activeFrame];
+    indices.forEach((index) => {
+      next[index] = colorForTool;
+    });
+
+    return next;
+  }, [
+    activeFrame,
+    activeSize,
+    colorForTool,
+    currentTool,
+    isPainting,
+    shapeStartIndex,
+    shapeCurrentIndex,
+    toolThickness,
+  ]);
+
+  const selectionPreviewIndices = useMemo(() => {
+    if (
+      currentTool !== TOOLS.SELECT ||
+      !isPainting ||
+      shapeStartIndex === null ||
+      shapeCurrentIndex === null
+    ) {
+      return [];
+    }
+
+    return getRectFillIndices(shapeStartIndex, shapeCurrentIndex, activeSize);
+  }, [activeSize, currentTool, isPainting, shapeStartIndex, shapeCurrentIndex]);
+
+  const visibleSelectionIndices = selectionPreviewIndices.length > 0 ? selectionPreviewIndices : selectedIndices;
+  const selectedIndexSet = useMemo(() => new Set(visibleSelectionIndices), [visibleSelectionIndices]);
+
+  const getProjectsBySize = (size) => projectsBySize[size] || [];
+  const cloneState = (value) => {
+    if (typeof structuredClone === "function") return structuredClone(value);
+    return JSON.parse(JSON.stringify(value));
+  };
+
+  const pushUndoSnapshot = () => {
+    undoStackRef.current.push({
+      projectsBySize: cloneState(projectsBySize),
+      activeProjectId,
+      activeFrameIndexByProject: cloneState(activeFrameIndexByProject),
+      selectedIndices: [...selectedIndices],
+    });
+
+    if (undoStackRef.current.length > 80) {
+      undoStackRef.current.shift();
+    }
+  };
+
+  const undoLastChange = () => {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+
+    setProjectsBySize(previous.projectsBySize);
+    setActiveProjectId(previous.activeProjectId);
+    setActiveFrameIndexByProject(previous.activeFrameIndexByProject);
+    setSelectedIndices(previous.selectedIndices || []);
+    setIsAnimationPlaying(false);
+  };
+
+  useEffect(() => {
+    if (!isAnimationPlaying || !activeProject || (activeProject.frames?.length || 0) < 2) return;
+
+    const intervalMs = Math.max(1000 / Math.max(fps, 1), 16);
+    const timer = window.setInterval(() => {
+      setActiveFrameIndexByProject((prev) => {
+        const current = prev[activeProject.id] || 0;
+        const next = (current + 1) % activeProject.frames.length;
+        return { ...prev, [activeProject.id]: next };
+      });
+    }, intervalMs);
+
+    return () => window.clearInterval(timer);
+  }, [isAnimationPlaying, fps, activeProject]);
+
+  const updateActiveFrame = (updater) => {
+    if (!activeProject) return;
+
+    const updated = getProjectsBySize(activeSize).map((project) => {
+      if (project.id !== activeProject.id) return project;
+      const frames = [...project.frames];
+      const framePixels = [...frames[activeFrameIndex]];
+      const nextPixels = updater(framePixels);
+      frames[activeFrameIndex] = nextPixels;
+      return { ...project, frames };
+    });
+
+    setProjectsBySize((prev) => ({
+      ...prev,
+      [activeSize]: updated,
+    }));
+  };
+
+  const paintPixels = (indices) => {
+    const targetIndices = expandIndicesWithThickness(indices, activeSize, toolThickness);
+
+    updateActiveFrame((framePixels) => {
+      const next = [...framePixels];
+      targetIndices.forEach((index) => {
+        next[index] = colorForTool;
+      });
+      return next;
+    });
+  };
+
+  const clearCanvas = () => {
+    if (!activeProject) return;
+    pushUndoSnapshot();
+
+    const updated = getProjectsBySize(activeSize).map((project) => {
+      if (project.id !== activeProject.id) return project;
+      const frames = [...project.frames];
+      frames[activeFrameIndex] = createBlankPixels(project.size);
+      return { ...project, frames };
+    });
+
+    setProjectsBySize((prev) => ({
+      ...prev,
+      [activeSize]: updated,
+    }));
+  };
+
+  const handlePointerDown = (index) => {
+    if (!activeProject) return;
+
+    setLastPointerIndex(index);
+    setIsPainting(true);
+
+    if (currentTool === TOOLS.SELECT) {
+      setShapeStartIndex(index);
+      setShapeCurrentIndex(index);
+      return;
+    }
+
+    if (currentTool === TOOLS.BRUSH || currentTool === TOOLS.ERASER) {
+      pushUndoSnapshot();
+      paintPixels(getBrushStampIndices(index, activeSize, toolThickness));
+      return;
+    }
+
+    if (currentTool === TOOLS.BUCKET) {
+      pushUndoSnapshot();
+      updateActiveFrame((framePixels) => floodFill(framePixels, index, colorForTool, activeSize));
+      setIsPainting(false);
+      return;
+    }
+
+    pushUndoSnapshot();
+    setShapeStartIndex(index);
+    setShapeCurrentIndex(index);
+  };
+
+  const handlePointerEnter = (index) => {
+    if (!activeProject || !isPainting) return;
+    setLastPointerIndex(index);
+
+    if (currentTool === TOOLS.BRUSH || currentTool === TOOLS.ERASER) {
+      paintPixels(getBrushStampIndices(index, activeSize, toolThickness));
+      return;
+    }
+
+    if (currentTool === TOOLS.LINE || currentTool === TOOLS.SQUARE || currentTool === TOOLS.SELECT) {
+      setShapeCurrentIndex(index);
+    }
+  };
+
+  useEffect(() => {
+    setSelectedIndices([]);
+  }, [activeProjectId, activeFrameIndex]);
+
+  const commitShape = (endIndex) => {
+    if (!activeProject || shapeStartIndex === null) return;
+    const baseIndices =
+      currentTool === TOOLS.LINE
+        ? getLineIndices(shapeStartIndex, endIndex, activeSize)
+        : getSquareOutlineIndices(shapeStartIndex, endIndex, activeSize);
+    paintPixels(baseIndices);
+  };
+
+  const handlePointerUp = (index) => {
+    if (index !== undefined && index !== null) {
+      setLastPointerIndex(index);
+    }
+
+    if (isPainting && currentTool === TOOLS.SELECT) {
+      const endIndex = index ?? shapeCurrentIndex ?? shapeStartIndex;
+      if (endIndex !== null && shapeStartIndex !== null) {
+        setSelectedIndices(getRectFillIndices(shapeStartIndex, endIndex, activeSize));
+      }
+    }
+
+    if (isPainting && (currentTool === TOOLS.LINE || currentTool === TOOLS.SQUARE)) {
+      const endIndex = index ?? shapeCurrentIndex ?? shapeStartIndex;
+      if (endIndex !== null) commitShape(endIndex);
+    }
+
+    setShapeStartIndex(null);
+    setShapeCurrentIndex(null);
+    setIsPainting(false);
+  };
+
+  const addFrame = () => {
+    if (!activeProject) return;
+    pushUndoSnapshot();
+
+    const insertIndex = activeFrameIndex + 1;
+    const updated = getProjectsBySize(activeSize).map((project) => {
+      if (project.id !== activeProject.id) return project;
+
+      const frames = [...project.frames];
+      const sourceFrame = [...frames[activeFrameIndex]];
+      frames.splice(insertIndex, 0, sourceFrame);
+      return { ...project, frames };
+    });
+
+    setProjectsBySize((prev) => ({
+      ...prev,
+      [activeSize]: updated,
+    }));
+    setActiveFrameIndexByProject((prev) => ({
+      ...prev,
+      [activeProject.id]: insertIndex,
+    }));
+  };
+
+  const deleteFrame = (frameIndex) => {
+    if (!activeProject) return;
+    pushUndoSnapshot();
+
+    const projectId = activeProject.id;
+    const currentIndex = activeFrameIndexByProject[projectId] || 0;
+    let nextFrameIndex = currentIndex;
+
+    const updated = getProjectsBySize(activeSize).map((project) => {
+      if (project.id !== projectId) return project;
+
+      const frames = [...project.frames];
+      if (frames.length <= 1) {
+        frames[0] = createBlankPixels(project.size);
+        nextFrameIndex = 0;
+        return { ...project, frames };
+      }
+
+      frames.splice(frameIndex, 1);
+
+      if (frameIndex < currentIndex) {
+        nextFrameIndex = currentIndex - 1;
+      } else if (frameIndex === currentIndex) {
+        nextFrameIndex = Math.max(0, Math.min(currentIndex, frames.length - 1));
+      }
+
+      return { ...project, frames };
+    });
+
+    setProjectsBySize((prev) => ({
+      ...prev,
+      [activeSize]: updated,
+    }));
+    setActiveFrameIndexByProject((prev) => ({
+      ...prev,
+      [projectId]: nextFrameIndex,
+    }));
+  };
+
+  const getUniqueName = (size, baseName) => {
+    const names = new Set(getProjectsBySize(size).map((project) => project.name));
+    let candidate = baseName;
+    let suffix = 1;
+
+    while (names.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseName} ${suffix}`;
+    }
+
+    return candidate;
+  };
+
+  const openCreateModal = () => {
+    setNewProjectSize(CANVAS_SIZES[0]);
+    setNewProjectName("");
+    setIsCreateModalOpen(true);
+  };
+
+  const createProjectFromModal = () => {
+    pushUndoSnapshot();
+    const baseName = newProjectName.trim() || `${newProjectSize} x ${newProjectSize} Pixel File`;
+    const name = getUniqueName(newProjectSize, baseName);
+    const project = createProject(newProjectSize, name);
+
+    setProjectsBySize((prev) => ({
+      ...prev,
+      [newProjectSize]: [...getProjectsBySize(newProjectSize), project],
+    }));
+    setActiveProjectId(project.id);
+    setActiveFrameIndexByProject((prev) => ({ ...prev, [project.id]: 0 }));
+    setIsCreateModalOpen(false);
+    setCurrentView("editor");
+  };
+
+  const deleteProject = async (projectId) => {
+    if (!projectId) return;
+    pushUndoSnapshot();
+
+    const nextProjectsBySize = {};
+    let deletedProject = null;
+
+    CANVAS_SIZES.forEach((size) => {
+      const currentProjects = getProjectsBySize(size);
+      nextProjectsBySize[size] = currentProjects.filter((project) => {
+        if (project.id === projectId) {
+          deletedProject = project;
+          return false;
+        }
+        return true;
+      });
+    });
+
+    if (!deletedProject) return;
+
+    setProjectsBySize(nextProjectsBySize);
+    setActiveFrameIndexByProject((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, projectId)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+    setReferenceOverlayByProject((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, projectId)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+    setProjectCommunityLikes((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, projectId)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+    setPublishedProjectIds((prev) => {
+      if (!prev.has(projectId)) return prev;
+      const next = new Set(prev);
+      next.delete(projectId);
+      return next;
+    });
+
+    if (activeProjectId === projectId) {
+      const fallbackProject = Object.values(nextProjectsBySize).flat()[0] || null;
+      setActiveProjectId(fallbackProject?.id || null);
+      setSelectedIndices([]);
+      setIsAnimationPlaying(false);
+      setShapeStartIndex(null);
+      setShapeCurrentIndex(null);
+      setLastPointerIndex(null);
+    }
+
+    if (authUser?.uid) {
+      try {
+        const communityProjectId = `${authUser.uid}_${projectId}`;
+        await deleteDoc(doc(db, COMMUNITY_COLLECTION, communityProjectId));
+      } catch (_error) {
+        // Ignore cleanup errors. Local delete already succeeded.
+      }
+    }
+  };
+
+  const downloadBlob = (blob, extension) => {
+    if (!blob || !activeProject) return;
+
+    const safeName = activeProject.name.replace(/[\\/:"*?<>|]/g, "_");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `${safeName}.${extension}`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportFile = async (format) => {
+    if (!activeProject) return;
+
+    if (format === "cur") {
+      const blob = await buildCurBlob(activeProject, activeFrame);
+      downloadBlob(blob, "cur");
+      return;
+    }
+
+    if (format === "png") {
+      const blob = await buildPngBlob(activeProject, activeFrame);
+      downloadBlob(blob, "png");
+      return;
+    }
+
+    if (format === "gif") {
+      const blob = await buildGifBlob(activeProject, fps);
+      downloadBlob(blob, "gif");
+      return;
+    }
+
+    if (format === "sheet") {
+      const blob = await buildSpriteSheetPngBlob(activeProject);
+      downloadBlob(blob, "spritesheet.png");
+      return;
+    }
+
+    if (format === "json") {
+      const blob = buildJsonBlob(activeProject);
+      downloadBlob(blob, "json");
+    }
+  };
+
+  const handleReferenceUpload = (event) => {
+    if (!activeProject?.id) return;
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : null;
+      if (!result) return;
+      const image = new Image();
+      image.onload = () => {
+        const fittedTransform = getReferenceFitTransform(image.naturalWidth, image.naturalHeight);
+        setReferenceOverlayByProject((prev) => ({
+          ...(prev || {}),
+          [activeProject.id]: (() => {
+            const previousReference = prev[activeProject.id] || {};
+            return {
+              src: result,
+              opacity: previousReference.opacity ?? 0.5,
+              ...clampReferenceTransform({
+                ...fittedTransform,
+                x: previousReference.x ?? fittedTransform.x,
+                y: previousReference.y ?? fittedTransform.y,
+                rotation: previousReference.rotation ?? fittedTransform.rotation,
+                layer: previousReference.layer ?? fittedTransform.layer,
+              }),
+            };
+          })(),
+        }));
+      };
+      image.onerror = () => {
+        setReferenceOverlayByProject((prev) => ({
+          ...prev,
+          [activeProject.id]: (() => {
+            const previousReference = prev[activeProject.id] || {};
+            return {
+              src: result,
+              opacity: previousReference.opacity ?? 0.5,
+              ...clampReferenceTransform({
+                ...DEFAULT_REFERENCE_TRANSFORM,
+                x: previousReference.x ?? DEFAULT_REFERENCE_TRANSFORM.x,
+                y: previousReference.y ?? DEFAULT_REFERENCE_TRANSFORM.y,
+                rotation: previousReference.rotation ?? DEFAULT_REFERENCE_TRANSFORM.rotation,
+                layer: previousReference.layer ?? DEFAULT_REFERENCE_TRANSFORM.layer,
+              }),
+            };
+          })(),
+        }));
+      };
+      image.src = result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const setReferenceOpacity = (value) => {
+    if (!activeProject?.id) return;
+    setReferenceOverlayByProject((prev) => {
+      const current = prev[activeProject.id];
+      if (!current) return prev;
+      return {
+        ...prev,
+        [activeProject.id]: {
+          ...current,
+          opacity: Math.max(0, Math.min(1, Number(value) || 0)),
+        },
+      };
+    });
+  };
+
+  const setReferenceTransform = (nextTransform) => {
+    if (!activeProject?.id) return;
+    setReferenceOverlayByProject((prev) => {
+      const current = prev[activeProject.id];
+      if (!current) return prev;
+      const sourceTransform =
+        typeof nextTransform === "function"
+          ? nextTransform({
+              x: current.x,
+              y: current.y,
+              width: current.width,
+              height: current.height,
+              rotation: current.rotation,
+              layer: current.layer,
+            })
+          : nextTransform;
+
+      return {
+        ...prev,
+        [activeProject.id]: {
+          ...current,
+          ...clampReferenceTransform({
+            ...current,
+            ...sourceTransform,
+          }),
+        },
+      };
+    });
+  };
+
+  const resetReferenceTransform = () => {
+    setReferenceTransform(DEFAULT_REFERENCE_TRANSFORM);
+  };
+
+  const toggleReferenceLayer = () => {
+    setReferenceTransform((current) => ({
+      layer: current?.layer === "top" ? "behind" : "top",
+    }));
+  };
+
+  const clearReferenceOverlay = () => {
+    if (!activeProject?.id) return;
+    setReferenceOverlayByProject((prev) => {
+      if (!prev[activeProject.id]) return prev;
+      const next = { ...prev };
+      delete next[activeProject.id];
+      return next;
+    });
+  };
+
+  const addPaletteColor = () => {
+    if (palette.includes(pickerColor)) {
+      setBrushColor(pickerColor);
+      return;
+    }
+
+    setPalette((prev) => [...prev, pickerColor]);
+    setBrushColor(pickerColor);
+  };
+
+  const getSelectionBounds = (indices) => {
+    if (!indices || indices.length === 0) return null;
+
+    let minX = activeSize;
+    let minY = activeSize;
+    let maxX = 0;
+    let maxY = 0;
+
+    indices.forEach((index) => {
+      const { x, y } = toXY(index, activeSize);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    });
+
+    return { minX, minY, maxX, maxY };
+  };
+
+  const copySelection = () => {
+    if (!activeProject || selectedIndices.length === 0) return;
+
+    const bounds = getSelectionBounds(selectedIndices);
+    if (!bounds) return;
+
+    const width = bounds.maxX - bounds.minX + 1;
+    const height = bounds.maxY - bounds.minY + 1;
+    const pixels = [];
+
+    for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+        pixels.push(activeFrame[toIndex(x, y, activeSize)]);
+      }
+    }
+
+    setClipboard({ width, height, pixels });
+  };
+
+  const pasteClipboard = () => {
+    if (!activeProject || !clipboard) return;
+
+    const anchorIndex = lastPointerIndex ?? selectedIndices[0] ?? 0;
+    const anchor = toXY(anchorIndex, activeSize);
+    pushUndoSnapshot();
+
+    updateActiveFrame((framePixels) => {
+      const next = [...framePixels];
+
+      for (let y = 0; y < clipboard.height; y += 1) {
+        for (let x = 0; x < clipboard.width; x += 1) {
+          const targetX = anchor.x + x;
+          const targetY = anchor.y + y;
+          if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
+          const sourceIndex = y * clipboard.width + x;
+          next[toIndex(targetX, targetY, activeSize)] = clipboard.pixels[sourceIndex];
+        }
+      }
+
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const isEditableTarget = (target) => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName.toLowerCase();
+      return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+    };
+
+    const onKeyDown = (event) => {
+      if (!authUser || isEditableTarget(event.target)) return;
+      const commandKey = event.metaKey || event.ctrlKey;
+      if (!commandKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        undoLastChange();
+        return;
+      }
+
+      if (key === "c") {
+        event.preventDefault();
+        copySelection();
+        return;
+      }
+
+      if (key === "v") {
+        event.preventDefault();
+        pasteClipboard();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [authUser, copySelection, pasteClipboard]);
+
+  const signInWithGoogle = async () => {
+    try {
+      setAuthError("");
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      setAuthError(error?.message || "Login failed. Please try again.");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      setAuthError(error?.message || "Logout failed. Please try again.");
+    }
+  };
+
+  const publishProjectToCommunity = async (project) => {
+    if (!authUser?.uid || !project) return;
+
+    const communityProjectId = `${authUser.uid}_${project.id}`;
+    const communityRef = doc(db, COMMUNITY_COLLECTION, communityProjectId);
+    setPublishingProjectId(project.id);
+    let existingUpvotes = 0;
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const existing = await transaction.get(communityRef);
+        if (existing.exists()) {
+          const existingData = existing.data() || {};
+          existingUpvotes = Math.max(0, Number(existingData.upvotes) || 0);
+        }
+        const baseData = {
+          ownerUid: authUser.uid,
+          authorName: authUser.displayName || authUser.email || "Anonymous",
+          name: project.name,
+          size: project.size,
+          frameCount: project.frames?.length || 1,
+          previewPixels: getProjectPreviewPixels(project),
+          previewFrameStrings: getProjectPreviewFrameStrings(project),
+          updatedAt: serverTimestamp(),
+        };
+
+        if (existing.exists()) {
+          transaction.update(communityRef, baseData);
+        } else {
+          transaction.set(communityRef, {
+            ...baseData,
+            upvoterIds: [],
+            upvotes: 0,
+          });
+        }
+      });
+      setPublishedProjectIds((prev) => {
+        const next = new Set(prev);
+        next.add(project.id);
+        return next;
+      });
+      setProjectCommunityLikes((prev) => ({
+        ...prev,
+        [project.id]: prev[project.id] ?? existingUpvotes ?? 0,
+      }));
+      setCommunityError("");
+    } catch (_error) {
+      setCommunityError("Could not publish project.");
+    } finally {
+      setPublishingProjectId(null);
+    }
+  };
+
+  const toggleCommunityUpvote = async (projectId) => {
+    if (!authUser?.uid || !projectId) return;
+
+    const projectRef = doc(db, COMMUNITY_COLLECTION, projectId);
+    let previousProject = null;
+
+    setCommunityProjects((prev) => {
+      const updated = prev
+        .map((project) => {
+          if (project.id !== projectId) return project;
+          previousProject = project;
+          const hasUpvoted = !project.hasUpvoted;
+          return {
+            ...project,
+            hasUpvoted,
+            upvotes: Math.max(0, project.upvotes + (hasUpvoted ? 1 : -1)),
+          };
+        })
+        .sort((a, b) => b.upvotes - a.upvotes);
+      return updated;
+    });
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(projectRef);
+        if (!snapshot.exists()) return;
+
+        const data = snapshot.data() || {};
+        const existingUpvoterIds = Array.isArray(data.upvoterIds) ? data.upvoterIds : [];
+        const hasUpvoted = existingUpvoterIds.includes(authUser.uid);
+        const shouldUpvote = !hasUpvoted;
+        const nextUpvotes = Math.max(0, (Number(data.upvotes) || 0) + (shouldUpvote ? 1 : -1));
+
+        transaction.update(projectRef, {
+          upvotes: nextUpvotes,
+          upvoterIds: shouldUpvote ? arrayUnion(authUser.uid) : arrayRemove(authUser.uid),
+          updatedAt: serverTimestamp(),
+        });
+      });
+    } catch (_error) {
+      if (previousProject) {
+        setCommunityProjects((prev) =>
+          prev
+            .map((project) => (project.id === projectId ? previousProject : project))
+            .sort((a, b) => b.upvotes - a.upvotes)
+        );
+      }
+      setCommunityError("Could not register vote.");
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <main className="app-shell">
+        <div className="auth-card">
+          <h1>Loading</h1>
+        </div>
+      </main>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <main className="app-shell">
+        <div className="auth-card">
+          <p className="eyebrow">Pixel Forge</p>
+          <h1>Sign in required</h1>
+          <p className="subtitle">Please sign in before using the pixel editor.</p>
+          <button className="primary-button auth-button" onClick={signInWithGoogle}>
+            Continue with Google
+          </button>
+          {authError && <p className="auth-error">{authError}</p>}
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <AppHeader currentView={currentView} onSwitchView={setCurrentView} onLogout={handleLogout} />
+
+      {currentView === "home" ? (
+        <HomePage
+          authUser={authUser}
+          projects={allProjects}
+          publishedProjectIds={publishedProjectIds}
+          projectCommunityLikes={projectCommunityLikes}
+          publishingProjectId={publishingProjectId}
+          onCreateProject={openCreateModal}
+          onOpenProject={(projectId) => {
+            setActiveProjectId(projectId);
+            setIsAnimationPlaying(false);
+            setCurrentView("editor");
+          }}
+          onOpenEditor={() => setCurrentView("editor")}
+          onPublishProject={publishProjectToCommunity}
+          onDeleteProject={deleteProject}
+          communityProjects={communityProjects}
+          communityLoading={communityLoading}
+          communityError={communityError}
+          onToggleUpvote={toggleCommunityUpvote}
+        />
+      ) : (
+        <div className="workspace">
+          <EditorPanel
+            activeProject={activeProject}
+            projectCount={allProjects.length}
+            activeFrame={displayFrame}
+            selectedIndices={selectedIndexSet}
+            activeFrameIndex={activeFrameIndex}
+            brushColor={brushColor}
+            isGridVisible={isGridVisible}
+            onToggleGrid={() => setIsGridVisible((prev) => !prev)}
+            onSave={saveChanges}
+            saveDisabled={isSaving || !hasUnsavedChanges}
+            saveLabel={
+              isSaving
+                ? "Saving..."
+                : saveState === "saved"
+                  ? hasUnsavedChanges
+                    ? "Save"
+                    : "Saved"
+                  : "Save"
+            }
+            onClear={clearCanvas}
+            onExport={exportFile}
+            onOpenCreateModal={openCreateModal}
+            onPointerDown={handlePointerDown}
+            onPointerEnter={handlePointerEnter}
+            onPointerUp={handlePointerUp}
+            onStopPainting={() => handlePointerUp()}
+            onToggleAnimationPanel={() => setIsAnimationPanelOpen((prev) => !prev)}
+            isAnimationPanelOpen={isAnimationPanelOpen}
+            onAddFrame={addFrame}
+            onAnimationPlayToggle={() => setIsAnimationPlaying((prev) => !prev)}
+            isAnimationPlaying={isAnimationPlaying}
+            fps={fps}
+            onFpsChange={(value) => {
+              const parsed = Number(value);
+              if (Number.isNaN(parsed)) return;
+              setFps(Math.max(1, Math.min(60, parsed)));
+            }}
+            onSelectFrame={(index) => {
+              if (!activeProject) return;
+              setIsAnimationPlaying(false);
+              setActiveFrameIndexByProject((prev) => ({
+                ...prev,
+                [activeProject.id]: index,
+              }));
+            }}
+            onDeleteFrame={(index) => {
+              setIsAnimationPlaying(false);
+              deleteFrame(index);
+            }}
+            referenceImage={activeProject ? referenceOverlayByProject[activeProject.id]?.src : ""}
+            referenceOpacity={activeProject ? referenceOverlayByProject[activeProject.id]?.opacity ?? 0.5 : 0.5}
+            referenceTransform={
+              activeProject
+                ? clampReferenceTransform({
+                    ...DEFAULT_REFERENCE_TRANSFORM,
+                    ...referenceOverlayByProject[activeProject.id],
+                  })
+                : DEFAULT_REFERENCE_TRANSFORM
+            }
+            onReferenceUpload={handleReferenceUpload}
+            onReferenceOpacityChange={setReferenceOpacity}
+            onReferenceTransformChange={setReferenceTransform}
+            onReferenceResetTransform={resetReferenceTransform}
+            onReferenceLayerToggle={toggleReferenceLayer}
+            onClearReference={clearReferenceOverlay}
+          />
+
+          <PalettePanel
+            palette={palette}
+            brushColor={brushColor}
+            pickerColor={pickerColor}
+            setPickerColor={setPickerColor}
+            setBrushColor={setBrushColor}
+            onAddPaletteColor={addPaletteColor}
+            currentTool={currentTool}
+            onSelectTool={setCurrentTool}
+            toolThickness={toolThickness}
+            onThicknessChange={(value) => setToolThickness(clampBrushSize(value))}
+            tools={TOOLS}
+          />
+        </div>
+      )}
+
+      <CreateFileModal
+        isOpen={isCreateModalOpen}
+        newProjectName={newProjectName}
+        setNewProjectName={setNewProjectName}
+        newProjectSize={newProjectSize}
+        setNewProjectSize={setNewProjectSize}
+        onClose={() => setIsCreateModalOpen(false)}
+        onCreate={createProjectFromModal}
+      />
+    </main>
+  );
+}
+
+export default App;

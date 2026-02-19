@@ -1,0 +1,60 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId}/editorState/{stateId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    match /communityProjects/{projectId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.upvotes == 0
+        && request.resource.data.upvoterIds is list
+        && request.resource.data.upvoterIds.size() == 0;
+
+      allow update: if signedIn() && (
+        (
+          resource.data.ownerUid == request.auth.uid
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.upvotes == resource.data.upvotes
+          && request.resource.data.upvoterIds == resource.data.upvoterIds
+        )
+        ||
+        (
+          request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.name == resource.data.name
+          && request.resource.data.authorName == resource.data.authorName
+          && request.resource.data.size == resource.data.size
+          && request.resource.data.frameCount == resource.data.frameCount
+          && (
+            (
+              request.auth.uid in request.resource.data.upvoterIds
+              && !(request.auth.uid in resource.data.upvoterIds)
+              && request.resource.data.upvotes == resource.data.upvotes + 1
+            )
+            ||
+            (
+              !(request.auth.uid in request.resource.data.upvoterIds)
+              && request.auth.uid in resource.data.upvoterIds
+              && request.resource.data.upvotes == resource.data.upvotes - 1
+              && request.resource.data.upvotes >= 0
+            )
+          )
+        )
+      );
+
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+  }
+}
