@@ -29,6 +29,7 @@ import {
   Loader2,
   MousePointer2,
   PaintBucket,
+  Pipette,
   Pencil,
   Grid3x3,
   Clapperboard,
@@ -585,6 +586,9 @@ function App() {
   const [customSaturation, setCustomSaturation] = useState(100);
   const [customValue, setCustomValue] = useState(100);
   const [customHexInput, setCustomHexInput] = useState("#ffffff");
+  const [isEyedropperArmed, setIsEyedropperArmed] = useState(false);
+  const [isColorMenuPinnedOpen, setIsColorMenuPinnedOpen] = useState(false);
+  const [eyedropperPreview, setEyedropperPreview] = useState(null);
   const [customPalette, setCustomPalette] = useState(() => normalizeCustomPalette());
   const [currentTool, setCurrentTool] = useState(TOOLS.BRUSH);
   const [toolThickness, setToolThickness] = useState(1);
@@ -1214,6 +1218,28 @@ function App() {
   const handlePointerDown = (index) => {
     if (!activeProject) return;
 
+    if (isEyedropperArmed) {
+      setLastPointerIndex(index);
+      const sampledColor = activeFrame[index];
+
+      if (sampledColor === TRANSPARENT) {
+        setBrushColor(TRANSPARENT);
+        setCurrentTool(TOOLS.ERASER);
+      } else if (typeof sampledColor === "string") {
+        handleSelectColor(sampledColor);
+        setCurrentTool(TOOLS.BRUSH);
+      }
+
+      setIsEyedropperArmed(false);
+      setIsColorMenuPinnedOpen(true);
+      setEyedropperPreview(null);
+      return;
+    }
+
+    if (isColorMenuPinnedOpen) {
+      setIsColorMenuPinnedOpen(false);
+    }
+
     setLastPointerIndex(index);
     setIsPainting(true);
 
@@ -1255,6 +1281,23 @@ function App() {
     }
   };
 
+  const handlePixelHover = (index, event) => {
+    if (!isEyedropperArmed || !activeProject) return;
+    const hoveredColor = activeFrame[index] || TRANSPARENT;
+    setEyedropperPreview({
+      x: event.clientX,
+      y: event.clientY,
+      color: hoveredColor,
+    });
+  };
+
+  const selectTool = (nextTool) => {
+    setIsColorMenuPinnedOpen(false);
+    setIsEyedropperArmed(false);
+    setEyedropperPreview(null);
+    setCurrentTool(nextTool);
+  };
+
   useEffect(() => {
     setSelectedIndices([]);
   }, [activeProjectId, activeFrameIndex]);
@@ -1283,6 +1326,10 @@ function App() {
     if (isPainting && (currentTool === TOOLS.LINE || currentTool === TOOLS.SQUARE)) {
       const endIndex = index ?? shapeCurrentIndex ?? shapeStartIndex;
       if (endIndex !== null) commitShape(endIndex);
+    }
+
+    if (isEyedropperArmed) {
+      setEyedropperPreview(null);
     }
 
     setShapeStartIndex(null);
@@ -1527,6 +1574,9 @@ function App() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    setIsColorMenuPinnedOpen(false);
+    setIsEyedropperArmed(false);
+    setEyedropperPreview(null);
     setCurrentTool(TOOLS.SELECT);
 
     const reader = new FileReader();
@@ -1667,6 +1717,7 @@ function App() {
     setPickerColor(normalized);
     setBrushColor(normalized);
     setCustomHexInput(normalized);
+    setIsEyedropperArmed(false);
   };
 
   const openCustomColorPicker = () => {
@@ -2016,7 +2067,7 @@ function App() {
             />
           </div>
           <div className="icon-action-toolbar-center">
-            <div className="icon-action-color-control">
+            <div className={`icon-action-color-control ${(isEyedropperArmed || isColorMenuPinnedOpen) ? "menu-open" : ""}`}>
               <IconActionButton
                 className="icon-action-color-button"
                 ariaLabel="Color"
@@ -2042,18 +2093,40 @@ function App() {
                 </div>
                 <div className="icon-action-custom-picker-wrap">
                   <span className="icon-action-custom-label">Custom colors</span>
-                  <button
-                    type="button"
-                    className="icon-action-color-picker-gradient"
-                    aria-label="Open custom color picker"
-                    onClick={() => {
-                      if (isCustomColorPickerOpen) {
-                        setIsCustomColorPickerOpen(false);
-                      } else {
-                        openCustomColorPicker();
-                      }
-                    }}
-                  />
+                  <div className="icon-action-custom-picker-actions">
+                    <button
+                      type="button"
+                      className="icon-action-color-picker-gradient"
+                      aria-label="Open custom color picker"
+                      onClick={() => {
+                        if (isCustomColorPickerOpen) {
+                          setIsCustomColorPickerOpen(false);
+                        } else {
+                          openCustomColorPicker();
+                        }
+                      }}
+                    />
+                    <IconActionButton
+                      icon={Pipette}
+                      iconSize={14}
+                      className="icon-action-color-pipette"
+                      isActive={isEyedropperArmed}
+                      ariaLabel="Eyedropper: click a canvas pixel to sample color"
+                      title="Eyedropper"
+                      onClick={() => {
+                        setIsEyedropperArmed((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            setIsColorMenuPinnedOpen(true);
+                          } else {
+                            setIsColorMenuPinnedOpen(false);
+                            setEyedropperPreview(null);
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                  </div>
                   <div className={`icon-action-custom-picker-popover ${isCustomColorPickerOpen ? "open" : ""}`}>
                     <div
                       ref={customSvAreaRef}
@@ -2121,6 +2194,7 @@ function App() {
                     </label>
                   </div>
                 </div>
+                <span className="icon-action-custom-label icon-action-custom-palette-label">Custom pallete</span>
                 <div className="icon-action-custom-grid">
                   {customPalette.map((color, index) => (
                     <button
@@ -2141,7 +2215,7 @@ function App() {
               isActive={currentTool === TOOLS.BRUSH}
               title="Pencil"
               ariaLabel="Pencil"
-              onClick={() => setCurrentTool(TOOLS.BRUSH)}
+              onClick={() => selectTool(TOOLS.BRUSH)}
             />
             <IconActionButton
               icon={Eraser}
@@ -2149,7 +2223,7 @@ function App() {
               isActive={currentTool === TOOLS.ERASER}
               title="Eraser"
               ariaLabel="Eraser"
-              onClick={() => setCurrentTool(TOOLS.ERASER)}
+              onClick={() => selectTool(TOOLS.ERASER)}
             />
             <IconActionButton
               icon={Square}
@@ -2157,7 +2231,7 @@ function App() {
               isActive={currentTool === TOOLS.SQUARE}
               title="Square"
               ariaLabel="Square"
-              onClick={() => setCurrentTool(TOOLS.SQUARE)}
+              onClick={() => selectTool(TOOLS.SQUARE)}
             />
             <IconActionButton
               icon={PaintBucket}
@@ -2165,7 +2239,7 @@ function App() {
               isActive={currentTool === TOOLS.BUCKET}
               title="Paint bucket"
               ariaLabel="Paint bucket"
-              onClick={() => setCurrentTool(TOOLS.BUCKET)}
+              onClick={() => selectTool(TOOLS.BUCKET)}
             />
             <IconActionButton
               icon={ImageIcon}
@@ -2180,7 +2254,7 @@ function App() {
               isActive={currentTool === TOOLS.SELECT}
               title="Select"
               ariaLabel="Select"
-              onClick={() => setCurrentTool(TOOLS.SELECT)}
+              onClick={() => selectTool(TOOLS.SELECT)}
             />
             <IconActionButton
               icon={Grid3x3}
@@ -2224,6 +2298,7 @@ function App() {
             onOpenCreateModal={openCreateModal}
             onPointerDown={handlePointerDown}
             onPointerEnter={handlePointerEnter}
+            onPixelHover={handlePixelHover}
             onPointerUp={handlePointerUp}
             onStopPainting={() => handlePointerUp()}
             isAnimationPanelOpen={isAnimationPanelOpen}
@@ -2271,6 +2346,17 @@ function App() {
             onReferenceFlipVertical={flipReferenceVertical}
             onClearReference={clearReferenceOverlay}
           />
+          {isEyedropperArmed && eyedropperPreview ? (
+            <div
+              className={`eyedropper-cursor-preview ${eyedropperPreview.color === TRANSPARENT ? "transparent" : ""}`}
+              style={{
+                left: `${eyedropperPreview.x}px`,
+                top: `${eyedropperPreview.y}px`,
+                backgroundColor: eyedropperPreview.color === TRANSPARENT ? undefined : eyedropperPreview.color,
+              }}
+              aria-hidden="true"
+            />
+          ) : null}
 
         </div>
       )}

@@ -11,6 +11,18 @@ import {
 import { TRANSPARENT } from "../lib/pixelEditor";
 import AnimationPanel from "./AnimationPanel";
 
+const REFERENCE_MIN_SIZE_PERCENT = 2;
+const REFERENCE_RESIZE_HANDLES = [
+  { direction: "nw", label: "Resize from top left corner" },
+  { direction: "n", label: "Resize from top edge" },
+  { direction: "ne", label: "Resize from top right corner" },
+  { direction: "e", label: "Resize from right edge" },
+  { direction: "se", label: "Resize from bottom right corner" },
+  { direction: "s", label: "Resize from bottom edge" },
+  { direction: "sw", label: "Resize from bottom left corner" },
+  { direction: "w", label: "Resize from left edge" },
+];
+
 function EditorPanel({
   activeProject,
   projectCount,
@@ -22,6 +34,7 @@ function EditorPanel({
   onOpenCreateModal,
   onPointerDown,
   onPointerEnter,
+  onPixelHover,
   onPointerUp,
   onStopPainting,
   isAnimationPanelOpen,
@@ -94,9 +107,78 @@ function EditorPanel({
         return;
       }
 
+      if (dragState.mode === "rotate") {
+        const currentAngle =
+          (Math.atan2(event.clientY - dragState.centerClientY, event.clientX - dragState.centerClientX) * 180) /
+          Math.PI;
+        const angleDelta = currentAngle - dragState.startPointerAngle;
+        let nextRotation = dragState.startRotation + angleDelta;
+        if (event.shiftKey) {
+          nextRotation = Math.round(nextRotation / 15) * 15;
+        }
+        let normalizedRotation = ((nextRotation % 360) + 360) % 360;
+        if (normalizedRotation === 0) normalizedRotation = 360;
+        onReferenceTransformChange({ rotation: normalizedRotation });
+        return;
+      }
+
+      const direction = dragState.resizeDirection || "se";
+      const hasNorth = direction.includes("n");
+      const hasSouth = direction.includes("s");
+      const hasWest = direction.includes("w");
+      const hasEast = direction.includes("e");
+      const isHorizontalOnly = !hasNorth && !hasSouth && (hasEast || hasWest);
+      const isVerticalOnly = !hasWest && !hasEast && (hasNorth || hasSouth);
+      const aspectRatio = dragState.startAspectRatio || 1;
+
+      let nextWidth = dragState.startWidth;
+      let nextHeight = dragState.startHeight;
+
+      if (hasEast) nextWidth += deltaXPercent;
+      if (hasWest) nextWidth -= deltaXPercent;
+      if (hasSouth) nextHeight += deltaYPercent;
+      if (hasNorth) nextHeight -= deltaYPercent;
+
+      if (event.shiftKey) {
+        if (isHorizontalOnly) {
+          nextHeight = nextWidth / aspectRatio;
+        } else if (isVerticalOnly) {
+          nextWidth = nextHeight * aspectRatio;
+        } else {
+          const widthDeltaRatio = dragState.startWidth > 0 ? Math.abs((nextWidth - dragState.startWidth) / dragState.startWidth) : 0;
+          const heightDeltaRatio = dragState.startHeight > 0 ? Math.abs((nextHeight - dragState.startHeight) / dragState.startHeight) : 0;
+
+          if (widthDeltaRatio >= heightDeltaRatio) {
+            nextHeight = nextWidth / aspectRatio;
+          } else {
+            nextWidth = nextHeight * aspectRatio;
+          }
+        }
+      }
+
+      nextWidth = Math.max(REFERENCE_MIN_SIZE_PERCENT, nextWidth);
+      nextHeight = Math.max(REFERENCE_MIN_SIZE_PERCENT, nextHeight);
+
+      let nextX = dragState.startX;
+      let nextY = dragState.startY;
+
+      if (hasWest) {
+        nextX = dragState.startX + (dragState.startWidth - nextWidth);
+      } else if (event.shiftKey && isVerticalOnly) {
+        nextX = dragState.startX - (nextWidth - dragState.startWidth) / 2;
+      }
+
+      if (hasNorth) {
+        nextY = dragState.startY + (dragState.startHeight - nextHeight);
+      } else if (event.shiftKey && isHorizontalOnly) {
+        nextY = dragState.startY - (nextHeight - dragState.startHeight) / 2;
+      }
+
       onReferenceTransformChange({
-        width: dragState.startWidth + deltaXPercent,
-        height: dragState.startHeight + deltaYPercent,
+        x: nextX,
+        y: nextY,
+        width: nextWidth,
+        height: nextHeight,
       });
     };
 
@@ -232,7 +314,7 @@ function EditorPanel({
     return () => scrollContainer.removeEventListener("wheel", onWheel);
   }, []);
 
-  const beginReferenceTransform = (mode, event) => {
+  const beginReferenceTransform = (mode, event, resizeDirection = "se") => {
     if (!canAdjustReference) return;
     if (event.button !== 0) return;
     const frame = canvasFrameRef.current;
@@ -241,8 +323,16 @@ function EditorPanel({
     event.preventDefault();
     event.stopPropagation();
 
+    const startCenterClientX =
+      frameRect.left + ((activeReferenceTransform.x + activeReferenceTransform.width / 2) / 100) * frameRect.width;
+    const startCenterClientY =
+      frameRect.top + ((activeReferenceTransform.y + activeReferenceTransform.height / 2) / 100) * frameRect.height;
+    const startPointerAngle =
+      (Math.atan2(event.clientY - startCenterClientY, event.clientX - startCenterClientX) * 180) / Math.PI;
+
     referenceDragRef.current = {
       mode,
+      resizeDirection,
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -252,6 +342,14 @@ function EditorPanel({
       startY: activeReferenceTransform.y,
       startWidth: activeReferenceTransform.width,
       startHeight: activeReferenceTransform.height,
+      startRotation: activeReferenceTransform.rotation,
+      centerClientX: startCenterClientX,
+      centerClientY: startCenterClientY,
+      startPointerAngle,
+      startAspectRatio:
+        activeReferenceTransform.height > 0
+          ? activeReferenceTransform.width / activeReferenceTransform.height
+          : 1,
     };
   };
 
@@ -392,25 +490,44 @@ function EditorPanel({
           <Trash2 size={14} aria-hidden="true" />
         </button>
       </div>
-      <img
-        src={referenceImage}
-        alt=""
-        className="reference-overlay"
+      <div
+        className="reference-transform-layer"
         style={{
           transform: `rotate(${activeReferenceTransform.rotation}deg) scale(${activeReferenceTransform.flipX ? -1 : 1}, ${activeReferenceTransform.flipY ? -1 : 1})`,
-          opacity: Math.max(0, Math.min(1, referenceOpacity ?? 0.5)),
         }}
-        onDragStart={(event) => event.preventDefault()}
-      />
-      <div className="reference-hover-outline" aria-hidden="true" />
-      {canAdjustReference ? (
-        <button
-          type="button"
-          className="reference-resize-handle"
-          onPointerDown={(event) => beginReferenceTransform("resize", event)}
-          aria-label="Resize reference image"
+      >
+        <img
+          src={referenceImage}
+          alt=""
+          className="reference-overlay"
+          style={{
+            opacity: Math.max(0, Math.min(1, referenceOpacity ?? 0.5)),
+          }}
+          onDragStart={(event) => event.preventDefault()}
         />
-      ) : null}
+        <div className="reference-hover-outline" aria-hidden="true" />
+        {canAdjustReference ? (
+          <>
+            {REFERENCE_RESIZE_HANDLES.map(({ direction, label }) => (
+              <button
+                key={direction}
+                type="button"
+                className={`reference-resize-handle reference-resize-handle-${direction}`}
+                onPointerDown={(event) => beginReferenceTransform("resize", event, direction)}
+                aria-label={label}
+                title="Hold Shift to keep aspect ratio"
+              />
+            ))}
+            <button
+              type="button"
+              className="reference-rotate-handle"
+              onPointerDown={(event) => beginReferenceTransform("rotate", event)}
+              aria-label="Rotate reference image"
+              title="Rotate reference image (hold Shift to snap to 15°)"
+            />
+          </>
+        ) : null}
+      </div>
     </div>
   ) : null;
 
@@ -447,7 +564,11 @@ function EditorPanel({
                           className={`pixel ${isSelected ? "selected-pixel" : ""}`}
                           style={displayColor ? { backgroundColor: displayColor } : undefined}
                           onPointerDown={() => onPointerDown(index)}
-                          onPointerEnter={() => onPointerEnter(index)}
+                          onPointerEnter={(event) => {
+                            onPointerEnter(index);
+                            onPixelHover?.(index, event);
+                          }}
+                          onPointerMove={(event) => onPixelHover?.(index, event)}
                           onPointerUp={() => onPointerUp(index)}
                           onContextMenu={(event) => event.preventDefault()}
                           title={`${x}, ${y}`}

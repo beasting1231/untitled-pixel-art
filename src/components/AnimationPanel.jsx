@@ -19,6 +19,9 @@ function AnimationPanel({
   const dragStartIndexRef = useRef(null);
   const dragMovedRef = useRef(false);
   const selectionAnchorRef = useRef(activeFrameIndex);
+  const drawerContentRef = useRef(null);
+  const wasOpenRef = useRef(isOpen);
+  const [drawerMaxHeight, setDrawerMaxHeight] = useState("0px");
 
   const buildFrameRange = (startIndex, endIndex) => {
     const min = Math.min(startIndex, endIndex);
@@ -89,6 +92,32 @@ function AnimationPanel({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [frames.length, selectedFrameIndices, onDeleteFrame, onDeleteFrames]);
 
+  useEffect(() => {
+    const content = drawerContentRef.current;
+    if (!content) return;
+    const wasOpen = wasOpenRef.current;
+    const measuredHeight = `${content.scrollHeight}px`;
+
+    if (isOpen) {
+      if (!wasOpen) {
+        setDrawerMaxHeight("0px");
+        requestAnimationFrame(() => {
+          setDrawerMaxHeight(measuredHeight);
+        });
+      } else {
+        setDrawerMaxHeight(measuredHeight);
+      }
+    } else if (wasOpen) {
+      const currentHeight = content.getBoundingClientRect().height;
+      setDrawerMaxHeight(`${Math.max(0, Math.round(currentHeight))}px`);
+      requestAnimationFrame(() => {
+        setDrawerMaxHeight("0px");
+      });
+    }
+
+    wasOpenRef.current = isOpen;
+  }, [isOpen, frames.length]);
+
   const beginFrameDragSelection = (index, event) => {
     if (event.button !== 0) return;
     isDraggingSelectionRef.current = true;
@@ -135,78 +164,107 @@ function AnimationPanel({
     dragMovedRef.current = false;
   };
 
-  return (
-    <div className="animation-wrap">
-      <div className={`animation-panel ${isOpen ? "open" : "closed"}`} aria-hidden={!isOpen}>
-        <div className="animation-controls">
-          <button className="primary-button" onClick={onAddFrame}>
-            + Frame
-          </button>
-          <button className="primary-button" onClick={onPlayToggle}>
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-          <label className="label" htmlFor="fps-input">
-            FPS
-          </label>
-          <input
-            id="fps-input"
-            className="fps-input"
-            type="number"
-            min="1"
-            max="60"
-            value={fps}
-            onChange={(event) => onFpsChange(event.target.value)}
-          />
-        </div>
+  const handleFpsStep = (direction) => {
+    const numericFps = Number(fps);
+    const safeFps = Number.isFinite(numericFps) ? numericFps : 1;
+    const nextFps = Math.min(60, Math.max(1, safeFps + direction));
+    onFpsChange(String(nextFps));
+  };
 
-        <div className="frames-scroll">
-          {frames.map((frame, index) => (
-            <div key={index} className="frame-item">
-              <button
-                className={`frame-chip ${activeFrameIndex === index ? "active" : ""} ${selectedFrameIndices.includes(index) ? "range-selected" : ""}`}
-                onPointerDown={(event) => beginFrameDragSelection(index, event)}
-                onPointerEnter={() => updateFrameDragSelection(index)}
-                onClick={(event) => handleFrameClick(index, event)}
-                aria-label={`Frame ${index + 1}`}
-              >
-                <div className="frame-preview" style={{ "--preview-grid-size": size }}>
-                  {frame.map((color, pixelIndex) => (
+  return (
+    <div className={`animation-drawer ${isOpen ? "open" : "closed"}`} aria-hidden={!isOpen}>
+      <div className="animation-drawer-viewport" style={{ maxHeight: drawerMaxHeight }}>
+        <div ref={drawerContentRef} className="animation-panel">
+          <div className="animation-controls">
+            <button className="primary-button" onClick={onAddFrame}>
+              + Frame
+            </button>
+            <button className="primary-button" onClick={onPlayToggle}>
+              {isPlaying ? "Pause" : "Play"}
+            </button>
+            <label className="label" htmlFor="fps-input">
+              FPS
+            </label>
+            <div className="fps-input-wrap">
+              <input
+                id="fps-input"
+                className="fps-input"
+                type="number"
+                min="1"
+                max="60"
+                value={fps}
+                onChange={(event) => onFpsChange(event.target.value)}
+              />
+              <div className="fps-stepper">
+                <button
+                  type="button"
+                  className="fps-stepper-button"
+                  onClick={() => handleFpsStep(1)}
+                  aria-label="Increase FPS"
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  className="fps-stepper-button"
+                  onClick={() => handleFpsStep(-1)}
+                  aria-label="Decrease FPS"
+                >
+                  ▼
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="frames-scroll">
+            {frames.map((frame, index) => (
+              <div key={index} className="frame-item">
+                <button
+                  className={`frame-chip ${activeFrameIndex === index ? "active" : ""} ${selectedFrameIndices.includes(index) ? "range-selected" : ""}`}
+                  onPointerDown={(event) => beginFrameDragSelection(index, event)}
+                  onPointerEnter={() => updateFrameDragSelection(index)}
+                  onClick={(event) => handleFrameClick(index, event)}
+                  aria-label={`Frame ${index + 1}`}
+                >
+                  <div className="frame-preview" style={{ "--preview-grid-size": size }}>
+                    {frame.map((color, pixelIndex) => (
+                      <span
+                        key={pixelIndex}
+                        className="frame-preview-pixel"
+                        style={color ? { backgroundColor: color } : undefined}
+                      />
+                    ))}
+                  </div>
+                  {frames.length > 1 ? (
                     <span
-                      key={pixelIndex}
-                      className="frame-preview-pixel"
-                      style={color ? { backgroundColor: color } : undefined}
-                    />
-                  ))}
-                </div>
-                {frames.length > 1 ? (
-                  <span
-                    className="frame-delete"
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                    }}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDeleteFrame(index);
-                    }}
-                    role="button"
-                    aria-label={`Delete frame ${index + 1}`}
-                    tabIndex={0}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
+                      className="frame-delete"
+                      onPointerDown={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation();
                         onDeleteFrame(index);
-                      }
-                    }}
-                  >
-                    X
-                  </span>
-                ) : null}
-              </button>
-              <span className="frame-index-label">{index + 1}</span>
-            </div>
-          ))}
+                      }}
+                      role="button"
+                      aria-label={`Delete frame ${index + 1}`}
+                      tabIndex={0}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onDeleteFrame(index);
+                        }
+                      }}
+                    >
+                      X
+                    </span>
+                  ) : null}
+                </button>
+                <span className="frame-index-label">{index + 1}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
