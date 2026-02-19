@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Download } from "lucide-react";
-import { FilePlus2 } from "lucide-react";
+import {
+  ArrowDownToLine,
+  ArrowUpToLine,
+  Blend,
+  FilePlus2,
+  FlipHorizontal2,
+  FlipVertical2,
+  Trash2,
+} from "lucide-react";
 import { TRANSPARENT } from "../lib/pixelEditor";
 import AnimationPanel from "./AnimationPanel";
 
@@ -10,20 +17,13 @@ function EditorPanel({
   activeFrame,
   selectedIndices,
   activeFrameIndex,
-  brushColor,
   isGridVisible,
-  onToggleGrid,
-  onSave,
-  saveDisabled,
-  saveLabel,
-  onClear,
-  onExport,
+  isPointerToolActive,
   onOpenCreateModal,
   onPointerDown,
   onPointerEnter,
   onPointerUp,
   onStopPainting,
-  onToggleAnimationPanel,
   isAnimationPanelOpen,
   onAddFrame,
   onAnimationPlayToggle,
@@ -40,25 +40,25 @@ function EditorPanel({
   onReferenceTransformChange,
   onReferenceResetTransform,
   onReferenceLayerToggle,
+  onReferenceFlipHorizontal,
+  onReferenceFlipVertical,
   onClearReference,
 }) {
   const MIN_ZOOM = 0.5;
   const MAX_ZOOM = 4;
   const ZOOM_STEP = 0.4;
   const PAN_SENSITIVITY = 0.45;
+  const PINCH_ZOOM_FACTOR = 0.006;
   const activeSize = activeProject?.size || 16;
   const pixelSizeStyle = { "--grid-size": activeSize };
   const frames = activeProject?.frames || [];
-  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const exportMenuRef = useRef(null);
   const referenceInputRef = useRef(null);
   const canvasFrameRef = useRef(null);
   const canvasScrollRef = useRef(null);
   const referenceDragRef = useRef(null);
   const lastCenteredProjectIdRef = useRef("");
   const lastGestureScaleRef = useRef(1);
-  const zoomPercent = Math.round(zoomLevel * 100);
   const [isReferenceAdjustMode, setIsReferenceAdjustMode] = useState(false);
   const lastReferenceImageRef = useRef("");
   const activeReferenceTransform = {
@@ -68,29 +68,11 @@ function EditorPanel({
     height: Number(referenceTransform?.height) || 100,
     rotation: Number(referenceTransform?.rotation) || 360,
     layer: referenceTransform?.layer === "top" ? "top" : "behind",
+    flipX: Boolean(referenceTransform?.flipX),
+    flipY: Boolean(referenceTransform?.flipY),
   };
+  const canAdjustReference = Boolean(referenceImage) && (isReferenceAdjustMode || isPointerToolActive);
   const clampZoom = (value) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(value) || 1));
-
-  useEffect(() => {
-    const onPointerDown = (event) => {
-      if (!isExportMenuOpen) return;
-      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target)) {
-        setIsExportMenuOpen(false);
-      }
-    };
-
-    const onEscape = (event) => {
-      if (event.key === "Escape") setIsExportMenuOpen(false);
-    };
-
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onEscape);
-
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onEscape);
-    };
-  }, [isExportMenuOpen]);
 
   useEffect(() => {
     const onPointerMove = (event) => {
@@ -230,7 +212,8 @@ function EditorPanel({
       event.stopPropagation();
 
       if (isPinchGesture) {
-        const pinchFactor = 1 - event.deltaY * 0.0036;
+        const deltaY = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 800 : event.deltaY;
+        const pinchFactor = Math.exp(-deltaY * PINCH_ZOOM_FACTOR);
         setZoomLevel((prev) => clampZoom(prev * pinchFactor));
         return;
       }
@@ -244,7 +227,7 @@ function EditorPanel({
   }, []);
 
   const beginReferenceTransform = (mode, event) => {
-    if (!referenceImage || !isReferenceAdjustMode) return;
+    if (!canAdjustReference) return;
     if (event.button !== 0) return;
     const frame = canvasFrameRef.current;
     if (!frame) return;
@@ -269,25 +252,152 @@ function EditorPanel({
   const referenceOverlayNode = referenceImage ? (
     <div
       className={`reference-overlay-wrap ${
-        isReferenceAdjustMode ? "adjust-mode" : ""
+        canAdjustReference ? "adjust-mode" : ""
       } layer-${activeReferenceTransform.layer}`}
       style={{
         left: `${activeReferenceTransform.x}%`,
         top: `${activeReferenceTransform.y}%`,
         width: `${activeReferenceTransform.width}%`,
         height: `${activeReferenceTransform.height}%`,
-        transform: `rotate(${activeReferenceTransform.rotation}deg)`,
-        opacity: Math.max(0, Math.min(1, referenceOpacity ?? 0.5)),
       }}
       onPointerDown={(event) => beginReferenceTransform("move", event)}
     >
+      <div className="reference-overlay-actions">
+        <button
+          type="button"
+          className="icon-action-button reference-action-button"
+          title="Bring above pixels"
+          aria-label="Bring above pixels"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onReferenceTransformChange?.({ layer: "top" });
+          }}
+        >
+          <ArrowUpToLine size={14} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="icon-action-button reference-action-button"
+          title="Send below pixels"
+          aria-label="Send below pixels"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onReferenceTransformChange?.({ layer: "behind" });
+          }}
+        >
+          <ArrowDownToLine size={14} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="icon-action-button reference-action-button"
+          title="Flip horizontal"
+          aria-label="Flip horizontal"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onReferenceFlipHorizontal?.();
+          }}
+        >
+          <FlipHorizontal2 size={14} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="icon-action-button reference-action-button"
+          title="Flip vertical"
+          aria-label="Flip vertical"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onReferenceFlipVertical?.();
+          }}
+        >
+          <FlipVertical2 size={14} aria-hidden="true" />
+        </button>
+        <div className="reference-opacity-control">
+          <button
+            type="button"
+            className="icon-action-button reference-action-button"
+            title="Opacity"
+            aria-label="Opacity"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+          >
+            <Blend size={14} aria-hidden="true" />
+          </button>
+          <div className="reference-opacity-slider-popover">
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={Math.max(0, Math.min(1, Number(referenceOpacity) || 0.5))}
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+              onChange={(event) => {
+                onReferenceOpacityChange?.(event.target.value);
+              }}
+              aria-label="Reference opacity"
+            />
+          </div>
+        </div>
+        <button
+          type="button"
+          className="icon-action-button reference-action-button"
+          title="Remove image"
+          aria-label="Remove image"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onClearReference?.();
+          }}
+        >
+          <Trash2 size={14} aria-hidden="true" />
+        </button>
+      </div>
       <img
         src={referenceImage}
         alt=""
         className="reference-overlay"
+        style={{
+          transform: `rotate(${activeReferenceTransform.rotation}deg) scale(${activeReferenceTransform.flipX ? -1 : 1}, ${activeReferenceTransform.flipY ? -1 : 1})`,
+          opacity: Math.max(0, Math.min(1, referenceOpacity ?? 0.5)),
+        }}
         onDragStart={(event) => event.preventDefault()}
       />
-      {isReferenceAdjustMode ? (
+      <div className="reference-hover-outline" aria-hidden="true" />
+      {canAdjustReference ? (
         <button
           type="button"
           className="reference-resize-handle"
@@ -298,165 +408,9 @@ function EditorPanel({
     </div>
   ) : null;
 
-  const exportItems = [
-    { id: "cur", label: "Cursor (.cur)" },
-    { id: "png", label: "PNG (.png)" },
-    { id: "gif", label: "Animated GIF (.gif)" },
-    { id: "sheet", label: "Sprite Sheet (.png)" },
-    { id: "json", label: "Frames JSON (.json)" },
-  ];
-
   return (
     <section className={`editor-column${isAnimationPanelOpen ? " with-animation" : ""}`}>
       <div className="panel">
-        <div className={`meta-row ${activeProject ? "floating-toolbar floating-toolbar-main" : ""}`}>
-          <p className="meta">
-            Active: <strong>{activeProject?.name || "No file selected"}</strong>
-          </p>
-          <p className="meta">
-            Brush:
-            <span className="brush-preview" style={{ backgroundColor: brushColor }} aria-hidden="true" />
-          </p>
-          <button className="primary-button clear-button" onClick={onToggleGrid}>
-            {isGridVisible ? "Hide Grid" : "Show Grid"}
-          </button>
-          <button className="primary-button clear-button" onClick={onSave} disabled={saveDisabled}>
-            {saveLabel}
-          </button>
-          <div className="zoom-controls" aria-label="Canvas zoom controls">
-            <button
-              className="primary-button zoom-button"
-              onClick={() => setZoomLevel((prev) => clampZoom(Number((prev - ZOOM_STEP).toFixed(2))))}
-              disabled={zoomLevel <= MIN_ZOOM}
-              aria-label="Zoom out"
-            >
-              -
-            </button>
-            <span className="zoom-value" aria-live="polite">
-              {zoomPercent}%
-            </span>
-            <button
-              className="primary-button zoom-button"
-              onClick={() => setZoomLevel((prev) => clampZoom(Number((prev + ZOOM_STEP).toFixed(2))))}
-              disabled={zoomLevel >= MAX_ZOOM}
-              aria-label="Zoom in"
-            >
-              +
-            </button>
-          </div>
-          <button className="primary-button clear-button" onClick={onClear}>
-            Clear
-          </button>
-          <div className="export-menu-wrap" ref={exportMenuRef}>
-            <button
-              className="primary-button export-icon-button"
-              onClick={() => setIsExportMenuOpen((prev) => !prev)}
-              aria-label="Export options"
-              title="Export"
-            >
-              <Download size={18} aria-hidden="true" />
-            </button>
-
-            {isExportMenuOpen && (
-              <div className="export-menu" role="menu" aria-label="Export formats">
-                {exportItems.map((item) => (
-                  <button
-                    key={item.id}
-                    className="export-menu-item"
-                    onClick={() => {
-                      setIsExportMenuOpen(false);
-                      onExport(item.id);
-                    }}
-                    role="menuitem"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {activeProject && (
-          <div className="reference-controls floating-toolbar floating-toolbar-reference">
-            <button
-              className="primary-button ghost-button"
-              type="button"
-              onClick={() => referenceInputRef.current?.click()}
-            >
-              Add reference
-            </button>
-            <button
-              className="primary-button ghost-button"
-              type="button"
-              onClick={onClearReference}
-              disabled={!referenceImage}
-            >
-              Clear reference
-            </button>
-            <label className="label reference-opacity-label" htmlFor="reference-opacity">
-              Opacity
-            </label>
-            <input
-              id="reference-opacity"
-              className="reference-opacity-slider"
-              type="range"
-              min="0"
-              max="100"
-              value={Math.round((referenceOpacity ?? 0.5) * 100)}
-              onChange={(event) => onReferenceOpacityChange(Number(event.target.value) / 100)}
-              disabled={!referenceImage}
-            />
-            <span className="reference-opacity-value">{Math.round((referenceOpacity ?? 0.5) * 100)}%</span>
-            <label className="label reference-opacity-label" htmlFor="reference-rotation">
-              Rotate
-            </label>
-            <input
-              id="reference-rotation"
-              className="reference-opacity-slider reference-rotate-slider"
-              type="range"
-              min="1"
-              max="360"
-              value={Math.round(activeReferenceTransform.rotation)}
-              onChange={(event) => onReferenceTransformChange({ rotation: Number(event.target.value) })}
-              disabled={!referenceImage}
-            />
-            <span className="reference-opacity-value">{Math.round(activeReferenceTransform.rotation)}deg</span>
-            <button
-              className={`primary-button ghost-button ${isReferenceAdjustMode ? "active-adjust" : ""}`}
-              type="button"
-              onClick={() => setIsReferenceAdjustMode((prev) => !prev)}
-              disabled={!referenceImage}
-            >
-              {isReferenceAdjustMode ? "Done adjust" : "Adjust reference"}
-            </button>
-            <button
-              className="primary-button ghost-button"
-              type="button"
-              onClick={onReferenceResetTransform}
-              disabled={!referenceImage}
-            >
-              Reset transform
-            </button>
-            <button
-              className="primary-button ghost-button"
-              type="button"
-              onClick={onReferenceLayerToggle}
-              disabled={!referenceImage}
-            >
-              {activeReferenceTransform.layer === "top" ? "Move behind" : "Move on top"}
-            </button>
-            <span className="reference-zoom-hint">Zoom: pinch or Shift + scroll</span>
-            <input
-              ref={referenceInputRef}
-              type="file"
-              accept="image/*"
-              className="reference-file-input"
-              onChange={onReferenceUpload}
-            />
-          </div>
-        )}
-
         {activeProject ? (
           <div ref={canvasScrollRef} className="canvas-scroll-wrap">
             <div className="canvas-stage">
@@ -468,7 +422,7 @@ function EditorPanel({
                 <div className="pixel-canvas-wrap">
                   {activeReferenceTransform.layer === "behind" ? referenceOverlayNode : null}
                   <div
-                    className={`pixel-grid ${isReferenceAdjustMode && referenceImage ? "pointer-disabled" : ""}`}
+                    className={`pixel-grid ${canAdjustReference ? "pointer-disabled" : ""}`}
                     data-grid-visible={isGridVisible ? "true" : "false"}
                     style={pixelSizeStyle}
                     onPointerUp={onStopPainting}
@@ -527,7 +481,6 @@ function EditorPanel({
             frames={frames}
             size={activeSize}
             activeFrameIndex={activeFrameIndex}
-            onToggle={onToggleAnimationPanel}
             onAddFrame={onAddFrame}
             onPlayToggle={onAnimationPlayToggle}
             onFpsChange={onFpsChange}

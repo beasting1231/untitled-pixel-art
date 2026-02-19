@@ -5,7 +5,6 @@ function AnimationPanel({
   frames,
   size,
   activeFrameIndex,
-  onToggle,
   onAddFrame,
   onPlayToggle,
   onFpsChange,
@@ -14,10 +13,6 @@ function AnimationPanel({
 }) {
   return (
     <div className="animation-wrap">
-      <button className="primary-button" onClick={onToggle}>
-        {isOpen ? "Hide Animation" : "Animate"}
-      </button>
-
       {isOpen && (
         <div className="animation-panel">
           <div className="animation-controls">

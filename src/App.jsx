@@ -16,12 +16,24 @@ import {
   setDoc,
   where,
 } from "firebase/firestore";
-import AppHeader from "./components/AppHeader";
 import CreateFileModal from "./components/CreateFileModal";
 import EditorPanel from "./components/EditorPanel";
 import HomePage from "./components/HomePage";
-import PalettePanel from "./components/PalettePanel";
+import IconActionButton from "./components/IconActionButton";
 import { auth, db } from "./lib/firebase";
+import {
+  Check,
+  Eraser,
+  House,
+  Image as ImageIcon,
+  Loader2,
+  MousePointer2,
+  PaintBucket,
+  Pencil,
+  Grid3x3,
+  Save,
+  Square,
+} from "lucide-react";
 import {
   BASE_PALETTE,
   CANVAS_SIZES,
@@ -51,13 +63,16 @@ const COMMUNITY_COLLECTION = "communityProjects";
 const MAX_COMMUNITY_PREVIEW_FRAMES = 12;
 const MIN_BRUSH_SIZE = 1;
 const MAX_BRUSH_SIZE = 5;
+const CUSTOM_PALETTE_SLOTS = 6;
 const DEFAULT_REFERENCE_TRANSFORM = {
   x: 0,
   y: 0,
   width: 100,
   height: 100,
   rotation: 360,
-  layer: "behind",
+  layer: "top",
+  flipX: false,
+  flipY: false,
 };
 
 const toXY = (index, size) => ({ x: index % size, y: Math.floor(index / size) });
@@ -104,6 +119,194 @@ const parseFrameStrings = (value) => {
     .filter((frame) => Array.isArray(frame));
 };
 
+const clampChannel = (value, min, max) => Math.min(max, Math.max(min, value));
+const normalizeHexColor = (value) => {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim().toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(candidate)) {
+    return `#${candidate[1]}${candidate[1]}${candidate[2]}${candidate[2]}${candidate[3]}${candidate[3]}`;
+  }
+  if (/^#[0-9a-f]{6}$/i.test(candidate)) return candidate;
+  return null;
+};
+
+const hexToRgb = (hex) => {
+  if (typeof hex !== "string") return null;
+  const normalized = hex.trim().toLowerCase();
+  const full = /^#[0-9a-f]{3}$/i.test(normalized)
+    ? `#${normalized[1]}${normalized[1]}${normalized[2]}${normalized[2]}${normalized[3]}${normalized[3]}`
+    : normalized;
+  if (!/^#[0-9a-f]{6}$/i.test(full)) return null;
+  return {
+    r: parseInt(full.slice(1, 3), 16),
+    g: parseInt(full.slice(3, 5), 16),
+    b: parseInt(full.slice(5, 7), 16),
+  };
+};
+
+const rgbToHex = (r, g, b) => {
+  const toHex = (channel) => clampChannel(Math.round(channel), 0, 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+};
+
+const rgbToHsl = (r, g, b) => {
+  const rn = clampChannel(r, 0, 255) / 255;
+  const gn = clampChannel(g, 0, 255) / 255;
+  const bn = clampChannel(b, 0, 255) / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const lightness = (max + min) / 2;
+
+  if (max === min) {
+    return { h: 0, s: 0, l: Math.round(lightness * 100) };
+  }
+
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+
+  if (max === rn) hue = (gn - bn) / delta + (gn < bn ? 6 : 0);
+  else if (max === gn) hue = (bn - rn) / delta + 2;
+  else hue = (rn - gn) / delta + 4;
+
+  hue /= 6;
+  return {
+    h: Math.round(hue * 360),
+    s: Math.round(saturation * 100),
+    l: Math.round(lightness * 100),
+  };
+};
+
+const hslToRgb = (h, s, l) => {
+  const hue = ((h % 360) + 360) % 360;
+  const saturation = clampChannel(s, 0, 100) / 100;
+  const lightness = clampChannel(l, 0, 100) / 100;
+
+  if (saturation === 0) {
+    const value = Math.round(lightness * 255);
+    return { r: value, g: value, b: value };
+  }
+
+  const q =
+    lightness < 0.5
+      ? lightness * (1 + saturation)
+      : lightness + saturation - lightness * saturation;
+  const p = 2 * lightness - q;
+  const hk = hue / 360;
+
+  const hueToRgb = (t) => {
+    let tc = t;
+    if (tc < 0) tc += 1;
+    if (tc > 1) tc -= 1;
+    if (tc < 1 / 6) return p + (q - p) * 6 * tc;
+    if (tc < 1 / 2) return q;
+    if (tc < 2 / 3) return p + (q - p) * (2 / 3 - tc) * 6;
+    return p;
+  };
+
+  return {
+    r: Math.round(hueToRgb(hk + 1 / 3) * 255),
+    g: Math.round(hueToRgb(hk) * 255),
+    b: Math.round(hueToRgb(hk - 1 / 3) * 255),
+  };
+};
+
+const rgbToHsv = (r, g, b) => {
+  const rn = clampChannel(r, 0, 255) / 255;
+  const gn = clampChannel(g, 0, 255) / 255;
+  const bn = clampChannel(b, 0, 255) / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const delta = max - min;
+
+  let hue = 0;
+  if (delta !== 0) {
+    if (max === rn) hue = ((gn - bn) / delta + (gn < bn ? 6 : 0)) / 6;
+    else if (max === gn) hue = ((bn - rn) / delta + 2) / 6;
+    else hue = ((rn - gn) / delta + 4) / 6;
+  }
+
+  const saturation = max === 0 ? 0 : delta / max;
+  const value = max;
+
+  return {
+    h: Math.round(hue * 360),
+    s: Math.round(saturation * 100),
+    v: Math.round(value * 100),
+  };
+};
+
+const hsvToRgb = (h, s, v) => {
+  const hue = ((h % 360) + 360) % 360;
+  const saturation = clampChannel(s, 0, 100) / 100;
+  const value = clampChannel(v, 0, 100) / 100;
+  const c = value * saturation;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = value - c;
+
+  let rPrime = 0;
+  let gPrime = 0;
+  let bPrime = 0;
+
+  if (hue < 60) {
+    rPrime = c;
+    gPrime = x;
+  } else if (hue < 120) {
+    rPrime = x;
+    gPrime = c;
+  } else if (hue < 180) {
+    gPrime = c;
+    bPrime = x;
+  } else if (hue < 240) {
+    gPrime = x;
+    bPrime = c;
+  } else if (hue < 300) {
+    rPrime = x;
+    bPrime = c;
+  } else {
+    rPrime = c;
+    bPrime = x;
+  }
+
+  return {
+    r: Math.round((rPrime + m) * 255),
+    g: Math.round((gPrime + m) * 255),
+    b: Math.round((bPrime + m) * 255),
+  };
+};
+
+const hexToHsv = (hex) => {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return { h: 0, s: 100, v: 100 };
+  return rgbToHsv(rgb.r, rgb.g, rgb.b);
+};
+
+const hsvToHex = (h, s, v) => {
+  const rgb = hsvToRgb(h, s, v);
+  return rgbToHex(rgb.r, rgb.g, rgb.b);
+};
+
+const normalizeCustomPalette = (value) => {
+  const normalized = Array.isArray(value)
+    ? value.map((entry) => (typeof entry === "string" && entry.trim() ? entry : null))
+    : [];
+
+  while (normalized.length < CUSTOM_PALETTE_SLOTS) {
+    normalized.push(null);
+  }
+
+  if (normalized.length % CUSTOM_PALETTE_SLOTS !== 0) {
+    const missing = CUSTOM_PALETTE_SLOTS - (normalized.length % CUSTOM_PALETTE_SLOTS);
+    for (let index = 0; index < missing; index += 1) normalized.push(null);
+  }
+
+  if (normalized.every((entry) => entry !== null)) {
+    for (let index = 0; index < CUSTOM_PALETTE_SLOTS; index += 1) normalized.push(null);
+  }
+
+  return normalized;
+};
+
 const clampReferenceTransform = (transform) => {
   const source = transform && typeof transform === "object" ? transform : {};
   const layer = source.layer === "top" ? "top" : "behind";
@@ -114,6 +317,8 @@ const clampReferenceTransform = (transform) => {
     height: Math.max(5, Math.min(300, Number(source.height) || DEFAULT_REFERENCE_TRANSFORM.height)),
     rotation: Math.max(1, Math.min(360, Number(source.rotation) || DEFAULT_REFERENCE_TRANSFORM.rotation)),
     layer,
+    flipX: Boolean(source.flipX),
+    flipY: Boolean(source.flipY),
   };
 };
 
@@ -374,6 +579,12 @@ function App() {
   const [palette, setPalette] = useState(BASE_PALETTE);
   const [brushColor, setBrushColor] = useState(BASE_PALETTE[0]);
   const [pickerColor, setPickerColor] = useState(BASE_PALETTE[0]);
+  const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] = useState(false);
+  const [customHue, setCustomHue] = useState(0);
+  const [customSaturation, setCustomSaturation] = useState(100);
+  const [customValue, setCustomValue] = useState(100);
+  const [customHexInput, setCustomHexInput] = useState("#ffffff");
+  const [customPalette, setCustomPalette] = useState(() => normalizeCustomPalette());
   const [currentTool, setCurrentTool] = useState(TOOLS.BRUSH);
   const [toolThickness, setToolThickness] = useState(1);
   const [shapeStartIndex, setShapeStartIndex] = useState(null);
@@ -392,6 +603,7 @@ function App() {
   const [fps, setFps] = useState(8);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [savedSnapshot, setSavedSnapshot] = useState("");
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveState, setSaveState] = useState("idle");
   const [communityProjects, setCommunityProjects] = useState([]);
@@ -401,6 +613,8 @@ function App() {
   const [projectCommunityLikes, setProjectCommunityLikes] = useState({});
   const [missingPreviewProjectIds, setMissingPreviewProjectIds] = useState(new Set());
   const [publishingProjectId, setPublishingProjectId] = useState(null);
+  const referenceUploadInputRef = useRef(null);
+  const customSvAreaRef = useRef(null);
   const undoStackRef = useRef([]);
 
   useEffect(() => {
@@ -421,6 +635,7 @@ function App() {
       setReferenceOverlayByProject({});
       setHasHydrated(false);
       setSavedSnapshot("");
+      setHasUnsavedChanges(false);
       setIsSaving(false);
       setSaveState("idle");
       return;
@@ -449,10 +664,11 @@ function App() {
       setPalette(Array.isArray(state.palette) ? state.palette : BASE_PALETTE);
       setBrushColor(typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0]);
       setPickerColor(typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0]);
+      setCustomPalette(normalizeCustomPalette(state.customPalette));
       setCurrentTool(Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH);
       setToolThickness(clampBrushSize(state.toolThickness));
       setFps(Math.max(1, Math.min(60, Number(state.fps) || 8)));
-      setIsAnimationPanelOpen(Boolean(state.isAnimationPanelOpen));
+      setIsAnimationPanelOpen(false);
       setIsGridVisible(state.isGridVisible !== false);
 
       return {
@@ -465,10 +681,11 @@ function App() {
         palette: Array.isArray(state.palette) ? state.palette : BASE_PALETTE,
         brushColor: typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0],
         pickerColor: typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0],
+        customPalette: normalizeCustomPalette(state.customPalette),
         currentTool: Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH,
         toolThickness: clampBrushSize(state.toolThickness),
         fps: Math.max(1, Math.min(60, Number(state.fps) || 8)),
-        isAnimationPanelOpen: Boolean(state.isAnimationPanelOpen),
+        isAnimationPanelOpen: false,
         isGridVisible: state.isGridVisible !== false,
       };
     };
@@ -526,6 +743,7 @@ function App() {
           palette: BASE_PALETTE,
           brushColor: BASE_PALETTE[0],
           pickerColor: BASE_PALETTE[0],
+          customPalette: normalizeCustomPalette(),
           currentTool: TOOLS.BRUSH,
           toolThickness: 1,
           fps: 8,
@@ -733,6 +951,7 @@ function App() {
       palette,
       brushColor,
       pickerColor,
+      customPalette,
       currentTool,
       toolThickness,
       fps,
@@ -746,6 +965,7 @@ function App() {
     palette,
     brushColor,
     pickerColor,
+    customPalette,
     currentTool,
     toolThickness,
     fps,
@@ -755,7 +975,34 @@ function App() {
   );
 
   const currentSnapshot = useMemo(() => JSON.stringify(persistedState), [persistedState]);
-  const hasUnsavedChanges = hasHydrated && currentSnapshot !== savedSnapshot;
+
+  const currentPickerColorInputValue = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(pickerColor)
+    ? pickerColor
+    : "#000000";
+  const customPickerPreviewColor = useMemo(
+    () => hsvToHex(customHue, customSaturation, customValue),
+    [customHue, customSaturation, customValue]
+  );
+
+  useEffect(() => {
+    setHasUnsavedChanges(hasHydrated && currentSnapshot !== savedSnapshot);
+  }, [hasHydrated, currentSnapshot, savedSnapshot]);
+
+  useEffect(() => {
+    const normalized = normalizeHexColor(pickerColor);
+    if (normalized) {
+      setCustomHexInput(normalized);
+    }
+  }, [pickerColor]);
+
+  useEffect(() => {
+    if (saveState !== "saved") return;
+    const timer = window.setTimeout(() => {
+      setSaveState("idle");
+    }, 1200);
+
+    return () => window.clearTimeout(timer);
+  }, [saveState]);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -763,6 +1010,28 @@ function App() {
       setSaveState("idle");
     }
   }, [hasHydrated, hasUnsavedChanges, isSaving]);
+
+  useEffect(() => {
+    if (!authUser?.uid || !hasHydrated) return;
+
+    const timer = window.setTimeout(() => {
+      setDoc(
+        getUserStateRef(authUser.uid),
+        {
+          version: STORAGE_VERSION,
+          state: {
+            customPalette,
+          },
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      ).catch(() => {
+        // Best-effort autosave for custom palette slots.
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [authUser, hasHydrated, customPalette]);
 
   const saveChanges = async () => {
     if (!authUser?.uid || !hasHydrated || isSaving || !hasUnsavedChanges) return;
@@ -777,6 +1046,7 @@ function App() {
       };
       await setDoc(getUserStateRef(authUser.uid), payload, { merge: true });
       setSavedSnapshot(currentSnapshot);
+      setHasUnsavedChanges(false);
       setAuthError("");
       setSaveState("saved");
     } catch (error) {
@@ -1239,49 +1509,43 @@ function App() {
     reader.onload = () => {
       const result = typeof reader.result === "string" ? reader.result : null;
       if (!result) return;
-      const image = new Image();
+      const image = new window.Image();
       image.onload = () => {
         const fittedTransform = getReferenceFitTransform(image.naturalWidth, image.naturalHeight);
         setReferenceOverlayByProject((prev) => ({
           ...(prev || {}),
-          [activeProject.id]: (() => {
-            const previousReference = prev[activeProject.id] || {};
-            return {
-              src: result,
-              opacity: previousReference.opacity ?? 0.5,
-              ...clampReferenceTransform({
-                ...fittedTransform,
-                x: previousReference.x ?? fittedTransform.x,
-                y: previousReference.y ?? fittedTransform.y,
-                rotation: previousReference.rotation ?? fittedTransform.rotation,
-                layer: previousReference.layer ?? fittedTransform.layer,
-              }),
-            };
-          })(),
+          [activeProject.id]: {
+            src: result,
+            opacity: 0.5,
+            ...clampReferenceTransform(fittedTransform),
+          },
         }));
       };
       image.onerror = () => {
         setReferenceOverlayByProject((prev) => ({
           ...prev,
-          [activeProject.id]: (() => {
-            const previousReference = prev[activeProject.id] || {};
-            return {
-              src: result,
-              opacity: previousReference.opacity ?? 0.5,
-              ...clampReferenceTransform({
-                ...DEFAULT_REFERENCE_TRANSFORM,
-                x: previousReference.x ?? DEFAULT_REFERENCE_TRANSFORM.x,
-                y: previousReference.y ?? DEFAULT_REFERENCE_TRANSFORM.y,
-                rotation: previousReference.rotation ?? DEFAULT_REFERENCE_TRANSFORM.rotation,
-                layer: previousReference.layer ?? DEFAULT_REFERENCE_TRANSFORM.layer,
-              }),
-            };
-          })(),
+          [activeProject.id]: {
+            src: result,
+            opacity: 0.5,
+            ...clampReferenceTransform(DEFAULT_REFERENCE_TRANSFORM),
+          },
         }));
       };
       image.src = result;
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleGoHome = () => {
+    setActiveProjectId(null);
+    setCurrentView("home");
+    setSelectedIndices([]);
+    setIsAnimationPlaying(false);
+  };
+
+  const openReferenceImagePicker = () => {
+    if (!activeProject) return;
+    referenceUploadInputRef.current?.click();
   };
 
   const setReferenceOpacity = (value) => {
@@ -1313,6 +1577,8 @@ function App() {
               height: current.height,
               rotation: current.rotation,
               layer: current.layer,
+              flipX: current.flipX,
+              flipY: current.flipY,
             })
           : nextTransform;
 
@@ -1349,6 +1615,18 @@ function App() {
     });
   };
 
+  const flipReferenceHorizontal = () => {
+    setReferenceTransform((current) => ({
+      flipX: !current?.flipX,
+    }));
+  };
+
+  const flipReferenceVertical = () => {
+    setReferenceTransform((current) => ({
+      flipY: !current?.flipY,
+    }));
+  };
+
   const addPaletteColor = () => {
     if (palette.includes(pickerColor)) {
       setBrushColor(pickerColor);
@@ -1357,6 +1635,71 @@ function App() {
 
     setPalette((prev) => [...prev, pickerColor]);
     setBrushColor(pickerColor);
+  };
+
+  const handleSelectColor = (nextColor) => {
+    const normalized = normalizeHexColor(nextColor);
+    if (!normalized) return;
+    setPickerColor(normalized);
+    setBrushColor(normalized);
+    setCustomHexInput(normalized);
+  };
+
+  const openCustomColorPicker = () => {
+    const hsv = hexToHsv(currentPickerColorInputValue);
+    setCustomHue(hsv.h);
+    setCustomSaturation(hsv.s);
+    setCustomValue(hsv.v);
+    setCustomHexInput(currentPickerColorInputValue);
+    setIsCustomColorPickerOpen(true);
+  };
+
+  const applyCustomHsvColor = (nextHue, nextSaturation, nextValue) => {
+    const nextHex = hsvToHex(nextHue, nextSaturation, nextValue);
+    handleSelectColor(nextHex);
+  };
+
+  const handleCustomHexInputChange = (value) => {
+    setCustomHexInput(value);
+    const normalized = normalizeHexColor(value);
+    if (!normalized) return;
+
+    const hsv = hexToHsv(normalized);
+    setCustomHue(hsv.h);
+    setCustomSaturation(hsv.s);
+    setCustomValue(hsv.v);
+    handleSelectColor(normalized);
+  };
+
+  const updateCustomSvFromPointer = (clientX, clientY) => {
+    if (!customSvAreaRef.current) return;
+    const rect = customSvAreaRef.current.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const x = clampChannel(clientX - rect.left, 0, rect.width);
+    const y = clampChannel(clientY - rect.top, 0, rect.height);
+    const nextSaturation = Math.round((x / rect.width) * 100);
+    const nextValue = Math.round(100 - (y / rect.height) * 100);
+
+    setCustomSaturation(nextSaturation);
+    setCustomValue(nextValue);
+    applyCustomHsvColor(customHue, nextSaturation, nextValue);
+  };
+
+  const handleCustomPaletteSlotClick = (slotIndex) => {
+    const slotColor = customPalette[slotIndex];
+    if (slotColor) {
+      handleSelectColor(slotColor);
+      return;
+    }
+
+    setCustomPalette((prev) => {
+      const next = prev.map((entry, index) => (index === slotIndex ? pickerColor : entry));
+      if (next.every((entry) => entry !== null)) {
+        return [...next, ...Array.from({ length: CUSTOM_PALETTE_SLOTS }, () => null)];
+      }
+      return next;
+    });
   };
 
   const getSelectionBounds = (indices) => {
@@ -1606,9 +1949,7 @@ function App() {
 
   return (
     <main className="app-shell">
-      <AppHeader currentView={currentView} onSwitchView={setCurrentView} onLogout={handleLogout} />
-
-      {currentView === "home" ? (
+      {(currentView === "home" && !activeProject) ? (
         <HomePage
           authUser={authUser}
           projects={allProjects}
@@ -1631,34 +1972,228 @@ function App() {
         />
       ) : (
         <div className="workspace">
+          <input
+            ref={referenceUploadInputRef}
+            type="file"
+            accept="image/*"
+            className="reference-file-input"
+            onChange={handleReferenceUpload}
+            aria-hidden="true"
+            tabIndex={-1}
+          />
+          <div className="icon-action-toolbar-left">
+            <IconActionButton
+              icon={House}
+              iconSize={16}
+              className="home-return-button"
+              ariaLabel="Back to homescreen"
+              title="Back to homescreen"
+              onClick={handleGoHome}
+            />
+          </div>
+          <div className="icon-action-toolbar-center">
+            <div className="icon-action-color-control">
+              <IconActionButton
+                className="icon-action-color-button"
+                ariaLabel="Color"
+                title="Color"
+                style={{
+                  backgroundColor: brushColor === TRANSPARENT ? "#2a2d35" : brushColor,
+                }}
+              />
+              <div className="icon-action-color-menu" role="menu" aria-label="Color options">
+                <div className="icon-action-color-grid">
+                  {palette.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      className={`icon-action-color-swatch ${brushColor === color ? "active" : ""}`}
+                      onClick={() => handleSelectColor(color)}
+                      aria-label={`Select color ${color}`}
+                      style={{
+                        backgroundColor: color === TRANSPARENT ? "transparent" : color,
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="icon-action-custom-picker-wrap">
+                  <span className="icon-action-custom-label">Custom colors</span>
+                  <button
+                    type="button"
+                    className="icon-action-color-picker-gradient"
+                    aria-label="Open custom color picker"
+                    onClick={() => {
+                      if (isCustomColorPickerOpen) {
+                        setIsCustomColorPickerOpen(false);
+                      } else {
+                        openCustomColorPicker();
+                      }
+                    }}
+                  />
+                  <div className={`icon-action-custom-picker-popover ${isCustomColorPickerOpen ? "open" : ""}`}>
+                    <div
+                      ref={customSvAreaRef}
+                      className="icon-action-custom-sv-area"
+                      style={{ backgroundColor: `hsl(${customHue} 100% 50%)` }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        updateCustomSvFromPointer(event.clientX, event.clientY);
+
+                        const onPointerMove = (moveEvent) => {
+                          updateCustomSvFromPointer(moveEvent.clientX, moveEvent.clientY);
+                        };
+
+                        const onPointerUp = () => {
+                          window.removeEventListener("pointermove", onPointerMove);
+                        };
+
+                        window.addEventListener("pointermove", onPointerMove);
+                        window.addEventListener("pointerup", onPointerUp, { once: true });
+                      }}
+                    >
+                      <span
+                        className="icon-action-custom-sv-handle"
+                        style={{
+                          left: `${customSaturation}%`,
+                          top: `${100 - customValue}%`,
+                        }}
+                      />
+                    </div>
+                    <div
+                      className="icon-action-custom-preview"
+                      style={{ backgroundColor: customPickerPreviewColor }}
+                    />
+                    <label className="icon-action-custom-hue-control">
+                      <span>Hue</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="360"
+                        value={customHue}
+                        onChange={(event) => {
+                          const nextHue = Number(event.target.value);
+                          setCustomHue(nextHue);
+                          applyCustomHsvColor(nextHue, customSaturation, customValue);
+                        }}
+                      />
+                    </label>
+                    <label className="icon-action-custom-hex-control">
+                      <span>HEX</span>
+                      <input
+                        type="text"
+                        value={customHexInput}
+                        onChange={(event) => handleCustomHexInputChange(event.target.value)}
+                        onBlur={() => {
+                          const normalized = normalizeHexColor(customHexInput);
+                          if (!normalized) {
+                            setCustomHexInput(currentPickerColorInputValue);
+                          }
+                        }}
+                        placeholder="#ffffff"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                      />
+                    </label>
+                  </div>
+                </div>
+                <div className="icon-action-custom-grid">
+                  {customPalette.map((color, index) => (
+                    <button
+                      key={`custom-color-slot-${index}`}
+                      type="button"
+                      className={`icon-action-custom-swatch ${color ? "filled" : "empty"} ${color && brushColor === color ? "active" : ""}`}
+                      onClick={() => handleCustomPaletteSlotClick(index)}
+                      aria-label={color ? `Use custom color ${color}` : "Save current color to custom slot"}
+                      style={color ? { backgroundColor: color } : undefined}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+            <IconActionButton
+              icon={Pencil}
+              iconSize={16}
+              isActive={currentTool === TOOLS.BRUSH}
+              title="Pencil"
+              ariaLabel="Pencil"
+              onClick={() => setCurrentTool(TOOLS.BRUSH)}
+            />
+            <IconActionButton
+              icon={Eraser}
+              iconSize={16}
+              isActive={currentTool === TOOLS.ERASER}
+              title="Eraser"
+              ariaLabel="Eraser"
+              onClick={() => setCurrentTool(TOOLS.ERASER)}
+            />
+            <IconActionButton
+              icon={Square}
+              iconSize={16}
+              isActive={currentTool === TOOLS.SQUARE}
+              title="Square"
+              ariaLabel="Square"
+              onClick={() => setCurrentTool(TOOLS.SQUARE)}
+            />
+            <IconActionButton
+              icon={PaintBucket}
+              iconSize={16}
+              isActive={currentTool === TOOLS.BUCKET}
+              title="Paint bucket"
+              ariaLabel="Paint bucket"
+              onClick={() => setCurrentTool(TOOLS.BUCKET)}
+            />
+            <IconActionButton
+              icon={ImageIcon}
+              iconSize={16}
+              title="Image"
+              ariaLabel="Image"
+              onClick={openReferenceImagePicker}
+            />
+            <IconActionButton
+              icon={MousePointer2}
+              iconSize={16}
+              isActive={currentTool === TOOLS.SELECT}
+              title="Select"
+              ariaLabel="Select"
+              onClick={() => setCurrentTool(TOOLS.SELECT)}
+            />
+            <IconActionButton
+              icon={Grid3x3}
+              iconSize={16}
+              isActive={isGridVisible}
+              title={isGridVisible ? "Hide grid" : "Show grid"}
+              ariaLabel={isGridVisible ? "Hide grid" : "Show grid"}
+              onClick={() => setIsGridVisible((prev) => !prev)}
+            />
+          </div>
+          <div className="icon-action-toolbar-right">
+            <IconActionButton
+              icon={
+                isSaving ? Loader2 : saveState === "saved" ? Check : Save
+              }
+              iconSize={16}
+              iconClassName={isSaving ? "icon-action-spinner" : ""}
+              className={saveState === "saved" ? "save-success" : ""}
+              title={isSaving ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
+              ariaLabel={isSaving ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
+              disabled={isSaving || !hasUnsavedChanges}
+              onClick={() => void saveChanges()}
+            />
+          </div>
           <EditorPanel
             activeProject={activeProject}
             projectCount={allProjects.length}
             activeFrame={displayFrame}
             selectedIndices={selectedIndexSet}
             activeFrameIndex={activeFrameIndex}
-            brushColor={brushColor}
             isGridVisible={isGridVisible}
-            onToggleGrid={() => setIsGridVisible((prev) => !prev)}
-            onSave={saveChanges}
-            saveDisabled={isSaving || !hasUnsavedChanges}
-            saveLabel={
-              isSaving
-                ? "Saving..."
-                : saveState === "saved"
-                  ? hasUnsavedChanges
-                    ? "Save"
-                    : "Saved"
-                  : "Save"
-            }
-            onClear={clearCanvas}
-            onExport={exportFile}
+            isPointerToolActive={currentTool === TOOLS.SELECT}
             onOpenCreateModal={openCreateModal}
             onPointerDown={handlePointerDown}
             onPointerEnter={handlePointerEnter}
             onPointerUp={handlePointerUp}
             onStopPainting={() => handlePointerUp()}
-            onToggleAnimationPanel={() => setIsAnimationPanelOpen((prev) => !prev)}
             isAnimationPanelOpen={isAnimationPanelOpen}
             onAddFrame={addFrame}
             onAnimationPlayToggle={() => setIsAnimationPlaying((prev) => !prev)}
@@ -1696,22 +2231,11 @@ function App() {
             onReferenceTransformChange={setReferenceTransform}
             onReferenceResetTransform={resetReferenceTransform}
             onReferenceLayerToggle={toggleReferenceLayer}
+            onReferenceFlipHorizontal={flipReferenceHorizontal}
+            onReferenceFlipVertical={flipReferenceVertical}
             onClearReference={clearReferenceOverlay}
           />
 
-          <PalettePanel
-            palette={palette}
-            brushColor={brushColor}
-            pickerColor={pickerColor}
-            setPickerColor={setPickerColor}
-            setBrushColor={setBrushColor}
-            onAddPaletteColor={addPaletteColor}
-            currentTool={currentTool}
-            onSelectTool={setCurrentTool}
-            toolThickness={toolThickness}
-            onThicknessChange={(value) => setToolThickness(clampBrushSize(value))}
-            tools={TOOLS}
-          />
         </div>
       )}
 
