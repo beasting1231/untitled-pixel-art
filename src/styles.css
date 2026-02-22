@@ -1091,7 +1091,8 @@ h1 {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: repeat(var(--preview-grid-size), minmax(0, 1fr));
+  grid-template-columns: repeat(var(--preview-grid-width), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--preview-grid-height), minmax(0, 1fr));
   gap: 0;
   background: rgba(255, 255, 255, 0.06);
   border-radius: 10px !important;
@@ -1871,8 +1872,8 @@ input[type="color"]:focus {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: repeat(var(--grid-size), minmax(0, 1fr));
-  grid-template-rows: repeat(var(--grid-size), minmax(0, 1fr));
+  grid-template-columns: repeat(var(--grid-width), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--grid-height), minmax(0, 1fr));
   gap: 0;
   background: transparent;
   background-clip: padding-box;
@@ -1909,16 +1910,16 @@ input[type="color"]:focus {
     repeating-linear-gradient(
       to right,
       transparent 0,
-      transparent calc((100% / var(--grid-size)) - 1px),
-      var(--grid) calc((100% / var(--grid-size)) - 1px),
-      var(--grid) calc(100% / var(--grid-size))
+      transparent calc((100% / var(--grid-width)) - 1px),
+      var(--grid) calc((100% / var(--grid-width)) - 1px),
+      var(--grid) calc(100% / var(--grid-width))
     ),
     repeating-linear-gradient(
       to bottom,
       transparent 0,
-      transparent calc((100% / var(--grid-size)) - 1px),
-      var(--grid) calc((100% / var(--grid-size)) - 1px),
-      var(--grid) calc(100% / var(--grid-size))
+      transparent calc((100% / var(--grid-height)) - 1px),
+      var(--grid) calc((100% / var(--grid-height)) - 1px),
+      var(--grid) calc(100% / var(--grid-height))
     );
   border: 1px solid var(--grid);
 }

@@ -63,8 +63,9 @@ function EditorPanel({
   const ZOOM_STEP = 0.4;
   const PAN_SENSITIVITY = 0.45;
   const PINCH_ZOOM_FACTOR = 0.006;
-  const activeSize = activeProject?.size || 16;
-  const pixelSizeStyle = { "--grid-size": activeSize };
+  const activeWidth = Math.max(1, Number(activeProject?.width) || Number(activeProject?.size) || 16);
+  const activeHeight = Math.max(1, Number(activeProject?.height) || Number(activeProject?.size) || 16);
+  const pixelSizeStyle = { "--grid-width": activeWidth, "--grid-height": activeHeight };
   const frames = activeProject?.frames || [];
   const [zoomLevel, setZoomLevel] = useState(1);
   const referenceInputRef = useRef(null);
@@ -552,8 +553,8 @@ function EditorPanel({
                     onPointerLeave={onStopPainting}
                   >
                     {activeFrame.map((color, index) => {
-                      const x = (index % activeSize) + 1;
-                      const y = Math.floor(index / activeSize) + 1;
+                      const x = (index % activeWidth) + 1;
+                      const y = Math.floor(index / activeWidth) + 1;
                       const displayColor = color === TRANSPARENT ? undefined : color;
                       const isSelected = Boolean(selectedIndices?.has(index));
 
@@ -606,7 +607,8 @@ function EditorPanel({
             isPlaying={isAnimationPlaying}
             fps={fps}
             frames={frames}
-            size={activeSize}
+            width={activeWidth}
+            height={activeHeight}
             activeFrameIndex={activeFrameIndex}
             onAddFrame={onAddFrame}
             onPlayToggle={onAnimationPlayToggle}

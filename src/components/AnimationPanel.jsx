@@ -5,7 +5,8 @@ function AnimationPanel({
   isPlaying,
   fps,
   frames,
-  size,
+  width,
+  height,
   activeFrameIndex,
   onAddFrame,
   onPlayToggle,
@@ -226,7 +227,7 @@ function AnimationPanel({
                   onClick={(event) => handleFrameClick(index, event)}
                   aria-label={`Frame ${index + 1}`}
                 >
-                  <div className="frame-preview" style={{ "--preview-grid-size": size }}>
+                  <div className="frame-preview" style={{ "--preview-grid-width": width, "--preview-grid-height": height }}>
                     {frame.map((color, pixelIndex) => (
                       <span
                         key={pixelIndex}

@@ -1,6 +1,21 @@
 import { CANVAS_SIZES } from "../lib/pixelEditor";
 
-function CreateFileModal({ isOpen, newProjectName, setNewProjectName, newProjectSize, setNewProjectSize, onClose, onCreate }) {
+const MIN_CANVAS_SIZE = 1;
+const MAX_CANVAS_SIZE = 256;
+const clampCanvasSize = (value) =>
+  Math.max(MIN_CANVAS_SIZE, Math.min(MAX_CANVAS_SIZE, Math.round(Number(value) || CANVAS_SIZES[0])));
+
+function CreateFileModal({
+  isOpen,
+  newProjectName,
+  setNewProjectName,
+  newProjectWidth,
+  setNewProjectWidth,
+  newProjectHeight,
+  setNewProjectHeight,
+  onClose,
+  onCreate,
+}) {
   if (!isOpen) return null;
 
   return (
@@ -34,10 +49,13 @@ function CreateFileModal({ isOpen, newProjectName, setNewProjectName, newProject
             <button
               key={size}
               type="button"
-              className={`size-button ${newProjectSize === size ? "active" : ""}`}
-              onClick={() => setNewProjectSize(size)}
+              className={`size-button ${newProjectWidth === size && newProjectHeight === size ? "active" : ""}`}
+              onClick={() => {
+                setNewProjectWidth(size);
+                setNewProjectHeight(size);
+              }}
               role="radio"
-              aria-checked={newProjectSize === size}
+              aria-checked={newProjectWidth === size && newProjectHeight === size}
               aria-label={`${size} by ${size}`}
             >
               <span className="size-button-value">{size}</span>
@@ -45,6 +63,46 @@ function CreateFileModal({ isOpen, newProjectName, setNewProjectName, newProject
             </button>
           ))}
         </div>
+
+        <label className="label" htmlFor="new-file-custom-width">
+          Width
+        </label>
+        <input
+          id="new-file-custom-width"
+          type="number"
+          min={MIN_CANVAS_SIZE}
+          max={MAX_CANVAS_SIZE}
+          step={1}
+          className="file-input"
+          value={newProjectWidth}
+          onChange={(event) => {
+            const parsed = Number(event.target.value);
+            if (Number.isNaN(parsed)) return;
+            setNewProjectWidth(parsed);
+          }}
+          onBlur={() => setNewProjectWidth(clampCanvasSize(newProjectWidth))}
+          aria-label={`Custom file width from ${MIN_CANVAS_SIZE} to ${MAX_CANVAS_SIZE}`}
+        />
+
+        <label className="label" htmlFor="new-file-custom-height">
+          Height
+        </label>
+        <input
+          id="new-file-custom-height"
+          type="number"
+          min={MIN_CANVAS_SIZE}
+          max={MAX_CANVAS_SIZE}
+          step={1}
+          className="file-input"
+          value={newProjectHeight}
+          onChange={(event) => {
+            const parsed = Number(event.target.value);
+            if (Number.isNaN(parsed)) return;
+            setNewProjectHeight(parsed);
+          }}
+          onBlur={() => setNewProjectHeight(clampCanvasSize(newProjectHeight))}
+          aria-label={`Custom file height from ${MIN_CANVAS_SIZE} to ${MAX_CANVAS_SIZE}`}
+        />
 
         <div className="modal-actions">
           <button type="button" className="primary-button ghost-button" onClick={onClose}>

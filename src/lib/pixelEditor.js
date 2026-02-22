@@ -21,19 +21,28 @@ const newId = () =>
     : `project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 export const createEmptyProjectsBySize = () => ({
-  16: [],
-  32: [],
-  64: [],
+  "16x16": [],
+  "32x32": [],
+  "64x64": [],
 });
 
-export const createBlankPixels = (size) =>
-  Array.from({ length: size * size }, () => TRANSPARENT);
+export const getProjectDimensions = (project) => {
+  const width = Math.max(1, Number(project?.width) || Number(project?.size) || CANVAS_SIZES[0]);
+  const height = Math.max(1, Number(project?.height) || Number(project?.size) || CANVAS_SIZES[0]);
+  return { width, height };
+};
 
-export const createProject = (size, name) => ({
+export const getProjectBucketKey = (width, height) => `${Math.max(1, Number(width) || 1)}x${Math.max(1, Number(height) || 1)}`;
+
+export const createBlankPixels = (width, height = width) =>
+  Array.from({ length: width * height }, () => TRANSPARENT);
+
+export const createProject = (width, height, name) => ({
   id: newId(),
   name,
-  size,
-  frames: [createBlankPixels(size)],
+  width,
+  height,
+  frames: [createBlankPixels(width, height)],
 });
 
 const getColorParserContext = () => {
@@ -58,18 +67,19 @@ const toRgba = (color, parserContext) => {
   return rgba;
 };
 
-const drawFrameToContext = (context, framePixels, size, offsetX = 0, offsetY = 0) => {
+const drawFrameToContext = (context, framePixels, width, height, offsetX = 0, offsetY = 0) => {
   framePixels.forEach((color, index) => {
     if (color === TRANSPARENT) return;
-    const x = index % size;
-    const y = Math.floor(index / size);
+    const x = index % width;
+    const y = Math.floor(index / width);
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
     context.fillStyle = color;
     context.fillRect(offsetX + x, offsetY + y, 1, 1);
   });
 };
 
-const frameToRgba = (framePixels, size, parserContext) => {
-  const rgba = new Uint8Array(size * size * 4);
+const frameToRgba = (framePixels, width, height, parserContext) => {
+  const rgba = new Uint8Array(width * height * 4);
 
   framePixels.forEach((color, index) => {
     const [r, g, b, a] = toRgba(color, parserContext);
@@ -86,8 +96,7 @@ const frameToRgba = (framePixels, size, parserContext) => {
 export const buildCurBlob = async (project, pixels) => {
   if (!project || !pixels) return null;
 
-  const width = project.size;
-  const height = project.size;
+  const { width, height } = getProjectDimensions(project);
   const offscreen = document.createElement("canvas");
   offscreen.width = width;
   offscreen.height = height;
@@ -135,32 +144,34 @@ export const buildCurBlob = async (project, pixels) => {
 
 export const buildPngBlob = async (project, pixels) => {
   if (!project || !pixels) return null;
+  const { width, height } = getProjectDimensions(project);
 
   const canvas = document.createElement("canvas");
-  canvas.width = project.size;
-  canvas.height = project.size;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) return null;
 
-  context.clearRect(0, 0, project.size, project.size);
-  drawFrameToContext(context, pixels, project.size);
+  context.clearRect(0, 0, width, height);
+  drawFrameToContext(context, pixels, width, height);
 
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
 };
 
 export const buildSpriteSheetPngBlob = async (project) => {
   if (!project || !Array.isArray(project.frames) || project.frames.length === 0) return null;
+  const { width, height } = getProjectDimensions(project);
 
   const frameCount = project.frames.length;
   const canvas = document.createElement("canvas");
-  canvas.width = project.size * frameCount;
-  canvas.height = project.size;
+  canvas.width = width * frameCount;
+  canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) return null;
 
   context.clearRect(0, 0, canvas.width, canvas.height);
   project.frames.forEach((framePixels, frameIndex) => {
-    drawFrameToContext(context, framePixels, project.size, frameIndex * project.size, 0);
+    drawFrameToContext(context, framePixels, width, height, frameIndex * width, 0);
   });
 
   return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/png"));
@@ -169,7 +180,7 @@ export const buildSpriteSheetPngBlob = async (project) => {
 export const buildGifBlob = async (project, fps = 8) => {
   if (!project || !Array.isArray(project.frames) || project.frames.length === 0) return null;
 
-  const size = project.size;
+  const { width, height } = getProjectDimensions(project);
   const parserContext = getColorParserContext();
   if (!parserContext) return null;
 
@@ -177,12 +188,12 @@ export const buildGifBlob = async (project, fps = 8) => {
   const delay = Math.max(20, Math.round(1000 / Math.max(1, fps)));
 
   project.frames.forEach((framePixels, frameIndex) => {
-    const rgba = frameToRgba(framePixels, size, parserContext);
+    const rgba = frameToRgba(framePixels, width, height, parserContext);
     const palette = quantize(rgba, 256, { format: "rgba4444", oneBitAlpha: true });
     const index = applyPalette(rgba, palette, "rgba4444");
     const transparentIndex = palette.findIndex((entry) => entry?.[3] === 0);
 
-    gif.writeFrame(index, size, size, {
+    gif.writeFrame(index, width, height, {
       palette,
       delay,
       repeat: frameIndex === 0 ? 0 : undefined,
@@ -200,7 +211,8 @@ export const buildJsonBlob = (project) => {
 
   const payload = {
     name: project.name,
-    size: project.size,
+    width: project.width,
+    height: project.height,
     frameCount: project.frames.length,
     frames: project.frames,
   };

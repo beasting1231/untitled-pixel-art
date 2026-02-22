@@ -48,6 +48,8 @@ import {
   createBlankPixels,
   createEmptyProjectsBySize,
   createProject,
+  getProjectBucketKey,
+  getProjectDimensions,
 } from "./lib/pixelEditor";
 
 const TOOLS = {
@@ -77,8 +79,8 @@ const DEFAULT_REFERENCE_TRANSFORM = {
   flipY: false,
 };
 
-const toXY = (index, size) => ({ x: index % size, y: Math.floor(index / size) });
-const toIndex = (x, y, size) => y * size + x;
+const toXY = (index, width) => ({ x: index % width, y: Math.floor(index / width) });
+const toIndex = (x, y, width) => y * width + x;
 const getStorageKey = (uid) => `${STORAGE_KEY_PREFIX}:${uid}`;
 const getUserStateRef = (uid) => doc(db, "users", uid, "editorState", "pixelForge");
 const getProjectPreviewPixels = (project) =>
@@ -344,14 +346,64 @@ const getReferenceFitTransform = (imageWidth, imageHeight) => {
   };
 };
 
+const MIN_CANVAS_SIZE = 1;
+const MAX_CANVAS_SIZE = 256;
+const clampCanvasSize = (value) =>
+  Math.max(MIN_CANVAS_SIZE, Math.min(MAX_CANVAS_SIZE, Math.round(Number(value) || CANVAS_SIZES[0])));
+const getProjectDimensionsFromBucketKey = (bucketKey) => {
+  if (typeof bucketKey !== "string") return null;
+  const direct = /^(\d+)x(\d+)$/i.exec(bucketKey.trim());
+  if (direct) {
+    return {
+      width: clampCanvasSize(Number(direct[1])),
+      height: clampCanvasSize(Number(direct[2])),
+    };
+  }
+
+  const legacySize = Number(bucketKey);
+  if (Number.isInteger(legacySize) && legacySize >= MIN_CANVAS_SIZE) {
+    const clamped = clampCanvasSize(legacySize);
+    return { width: clamped, height: clamped };
+  }
+
+  return null;
+};
+const getProjectBucketKeys = (projectsBySize) => {
+  const keys = new Set(CANVAS_SIZES.map((size) => getProjectBucketKey(size, size)));
+  if (projectsBySize && typeof projectsBySize === "object") {
+    Object.keys(projectsBySize).forEach((rawKey) => {
+      const dimensions = getProjectDimensionsFromBucketKey(rawKey);
+      if (!dimensions) return;
+      keys.add(getProjectBucketKey(dimensions.width, dimensions.height));
+    });
+  }
+  return [...keys].sort((a, b) => {
+    const aDimensions = getProjectDimensionsFromBucketKey(a);
+    const bDimensions = getProjectDimensionsFromBucketKey(b);
+    if (!aDimensions || !bDimensions) return 0;
+    if (aDimensions.width !== bDimensions.width) return aDimensions.width - bDimensions.width;
+    return aDimensions.height - bDimensions.height;
+  });
+};
+const getProjectsFromBucket = (sourceProjectsBySize, bucketKey) => {
+  if (!sourceProjectsBySize || typeof sourceProjectsBySize !== "object") return [];
+  const direct = sourceProjectsBySize[bucketKey];
+  if (Array.isArray(direct)) return direct;
+
+  const dimensions = getProjectDimensionsFromBucketKey(bucketKey);
+  if (!dimensions || dimensions.width !== dimensions.height) return [];
+  const legacy = sourceProjectsBySize[String(dimensions.width)];
+  return Array.isArray(legacy) ? legacy : [];
+};
+
 const prepareStateForStorage = (state) => {
   if (!state || typeof state !== "object") return state;
   const sourceProjectsBySize = state.projectsBySize || {};
   const nextProjectsBySize = {};
 
-  CANVAS_SIZES.forEach((size) => {
-    const projects = Array.isArray(sourceProjectsBySize[size]) ? sourceProjectsBySize[size] : [];
-    nextProjectsBySize[size] = projects.map((project) => {
+  getProjectBucketKeys(sourceProjectsBySize).forEach((bucketKey) => {
+    const projects = getProjectsFromBucket(sourceProjectsBySize, bucketKey);
+    nextProjectsBySize[bucketKey] = projects.map((project) => {
       const frames = Array.isArray(project.frames) ? project.frames : [];
       const frameStrings = frames
         .filter((frame) => Array.isArray(frame))
@@ -375,19 +427,23 @@ const normalizeProjectsBySize = (value) => {
   const normalized = createEmptyProjectsBySize();
   if (!value || typeof value !== "object") return normalized;
 
-  CANVAS_SIZES.forEach((size) => {
-    const rawProjects = Array.isArray(value[size]) ? value[size] : [];
-    normalized[size] = rawProjects
+  getProjectBucketKeys(value).forEach((bucketKey) => {
+    const bucketDimensions = getProjectDimensionsFromBucketKey(bucketKey);
+    if (!bucketDimensions) return;
+    const rawProjects = getProjectsFromBucket(value, bucketKey);
+    normalized[bucketKey] = rawProjects
       .filter(
         (project) =>
           project &&
           typeof project.id === "string" &&
           typeof project.name === "string" &&
-          Number(project.size) === size &&
           (Array.isArray(project.frames) || Array.isArray(project.frameStrings))
       )
       .map((project) => {
-        const expectedLength = size * size;
+        const dimensions = getProjectDimensions(project);
+        const width = clampCanvasSize(dimensions.width || bucketDimensions.width);
+        const height = clampCanvasSize(dimensions.height || bucketDimensions.height);
+        const expectedLength = width * height;
         const rawFramesFromStrings = parseFrameStrings(project.frameStrings);
         const rawFrames =
           rawFramesFromStrings.length > 0
@@ -402,13 +458,14 @@ const normalizeProjectsBySize = (value) => {
                 .map((frame) =>
                   Array.from({ length: expectedLength }, (_, index) => frame[index] || TRANSPARENT)
                 )
-            : [createBlankPixels(size)];
+            : [createBlankPixels(width, height)];
 
         return {
           id: project.id,
           name: project.name,
-          size,
-          frames: frames.length > 0 ? frames : [createBlankPixels(size)],
+          width,
+          height,
+          frames: frames.length > 0 ? frames : [createBlankPixels(width, height)],
         };
       });
   });
@@ -416,9 +473,9 @@ const normalizeProjectsBySize = (value) => {
   return normalized;
 };
 
-const getLineIndices = (startIndex, endIndex, size) => {
-  const start = toXY(startIndex, size);
-  const end = toXY(endIndex, size);
+const getLineIndices = (startIndex, endIndex, width) => {
+  const start = toXY(startIndex, width);
+  const end = toXY(endIndex, width);
   const result = [];
 
   let x0 = start.x;
@@ -432,7 +489,7 @@ const getLineIndices = (startIndex, endIndex, size) => {
   let err = dx + dy;
 
   while (true) {
-    result.push(toIndex(x0, y0, size));
+    result.push(toIndex(x0, y0, width));
     if (x0 === x1 && y0 === y1) break;
     const e2 = 2 * err;
     if (e2 >= dy) {
@@ -448,9 +505,9 @@ const getLineIndices = (startIndex, endIndex, size) => {
   return result;
 };
 
-const getSquareOutlineIndices = (startIndex, endIndex, size) => {
-  const start = toXY(startIndex, size);
-  const end = toXY(endIndex, size);
+const getSquareOutlineIndices = (startIndex, endIndex, width) => {
+  const start = toXY(startIndex, width);
+  const end = toXY(endIndex, width);
   const minX = Math.min(start.x, end.x);
   const maxX = Math.max(start.x, end.x);
   const minY = Math.min(start.y, end.y);
@@ -459,21 +516,21 @@ const getSquareOutlineIndices = (startIndex, endIndex, size) => {
   const indices = new Set();
 
   for (let x = minX; x <= maxX; x += 1) {
-    indices.add(toIndex(x, minY, size));
-    indices.add(toIndex(x, maxY, size));
+    indices.add(toIndex(x, minY, width));
+    indices.add(toIndex(x, maxY, width));
   }
 
   for (let y = minY; y <= maxY; y += 1) {
-    indices.add(toIndex(minX, y, size));
-    indices.add(toIndex(maxX, y, size));
+    indices.add(toIndex(minX, y, width));
+    indices.add(toIndex(maxX, y, width));
   }
 
   return [...indices];
 };
 
-const getRectFillIndices = (startIndex, endIndex, size) => {
-  const start = toXY(startIndex, size);
-  const end = toXY(endIndex, size);
+const getRectFillIndices = (startIndex, endIndex, width) => {
+  const start = toXY(startIndex, width);
+  const end = toXY(endIndex, width);
   const minX = Math.min(start.x, end.x);
   const maxX = Math.max(start.x, end.x);
   const minY = Math.min(start.y, end.y);
@@ -482,7 +539,7 @@ const getRectFillIndices = (startIndex, endIndex, size) => {
 
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
-      indices.push(toIndex(x, y, size));
+      indices.push(toIndex(x, y, width));
     }
   }
 
@@ -500,17 +557,17 @@ const BRUSH_RADIUS_BY_SIZE = {
 const clampBrushSize = (value) =>
   Math.max(MIN_BRUSH_SIZE, Math.min(MAX_BRUSH_SIZE, Number(value) || MIN_BRUSH_SIZE));
 
-const getBrushStampIndices = (centerIndex, size, thickness) => {
-  const center = toXY(centerIndex, size);
+const getBrushStampIndices = (centerIndex, width, height, thickness) => {
+  const center = toXY(centerIndex, width);
   const brushSize = clampBrushSize(thickness);
   const radius = BRUSH_RADIUS_BY_SIZE[brushSize];
   if (radius <= 0) return [centerIndex];
 
   const searchRadius = Math.ceil(radius);
   const minX = Math.max(0, center.x - searchRadius);
-  const maxX = Math.min(size - 1, center.x + searchRadius);
+  const maxX = Math.min(width - 1, center.x + searchRadius);
   const minY = Math.max(0, center.y - searchRadius);
-  const maxY = Math.min(size - 1, center.y + searchRadius);
+  const maxY = Math.min(height - 1, center.y + searchRadius);
   const radiusSquared = radius * radius;
 
   const indices = [];
@@ -519,7 +576,7 @@ const getBrushStampIndices = (centerIndex, size, thickness) => {
       const dx = x - center.x;
       const dy = y - center.y;
       if (dx * dx + dy * dy <= radiusSquared) {
-        indices.push(toIndex(x, y, size));
+        indices.push(toIndex(x, y, width));
       }
     }
   }
@@ -527,19 +584,19 @@ const getBrushStampIndices = (centerIndex, size, thickness) => {
   return indices;
 };
 
-const expandIndicesWithThickness = (indices, size, thickness) => {
+const expandIndicesWithThickness = (indices, width, height, thickness) => {
   if (thickness <= 1) return [...new Set(indices)];
 
   const expanded = new Set(indices);
   indices.forEach((index) => {
-    const stamp = getBrushStampIndices(index, size, thickness);
+    const stamp = getBrushStampIndices(index, width, height, thickness);
     stamp.forEach((pixelIndex) => expanded.add(pixelIndex));
   });
 
   return [...expanded];
 };
 
-const floodFill = (pixels, startIndex, replacement, size) => {
+const floodFill = (pixels, startIndex, replacement, width, height) => {
   const target = pixels[startIndex];
   if (target === replacement) return pixels;
 
@@ -552,12 +609,12 @@ const floodFill = (pixels, startIndex, replacement, size) => {
     if (next[index] !== target) continue;
     next[index] = replacement;
 
-    const { x, y } = toXY(index, size);
+    const { x, y } = toXY(index, width);
     const neighbors = [];
-    if (x > 0) neighbors.push(toIndex(x - 1, y, size));
-    if (x < size - 1) neighbors.push(toIndex(x + 1, y, size));
-    if (y > 0) neighbors.push(toIndex(x, y - 1, size));
-    if (y < size - 1) neighbors.push(toIndex(x, y + 1, size));
+    if (x > 0) neighbors.push(toIndex(x - 1, y, width));
+    if (x < width - 1) neighbors.push(toIndex(x + 1, y, width));
+    if (y > 0) neighbors.push(toIndex(x, y - 1, width));
+    if (y < height - 1) neighbors.push(toIndex(x, y + 1, width));
 
     neighbors.forEach((n) => {
       if (!seen.has(n) && next[n] === target) {
@@ -600,7 +657,8 @@ function App() {
   const [lastPointerIndex, setLastPointerIndex] = useState(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectSize, setNewProjectSize] = useState(CANVAS_SIZES[0]);
+  const [newProjectWidth, setNewProjectWidth] = useState(() => clampCanvasSize(CANVAS_SIZES[0]));
+  const [newProjectHeight, setNewProjectHeight] = useState(() => clampCanvasSize(CANVAS_SIZES[0]));
   const [referenceOverlayByProject, setReferenceOverlayByProject] = useState({});
   const [isPainting, setIsPainting] = useState(false);
   const [isAnimationPanelOpen, setIsAnimationPanelOpen] = useState(false);
@@ -850,12 +908,15 @@ function App() {
           .map((projectDoc) => {
             const data = projectDoc.data() || {};
             const upvoterIds = Array.isArray(data.upvoterIds) ? data.upvoterIds : [];
+            const width = clampCanvasSize(Number(data.width) || Number(data.size) || 16);
+            const height = clampCanvasSize(Number(data.height) || Number(data.size) || 16);
             return {
               id: projectDoc.id,
               name: typeof data.name === "string" ? data.name : "Untitled Project",
               ownerUid: typeof data.ownerUid === "string" ? data.ownerUid : "",
               authorName: typeof data.authorName === "string" ? data.authorName : "Unknown creator",
-              size: Number(data.size) || 16,
+              width,
+              height,
               frameCount: Math.max(1, Number(data.frameCount) || 1),
               previewPixels: Array.isArray(data.previewPixels) ? data.previewPixels : [],
               previewFrames: parsePreviewFrameStrings(data.previewFrameStrings),
@@ -930,7 +991,8 @@ function App() {
             previewPixels: getProjectPreviewPixels(project),
             previewFrameStrings: getProjectPreviewFrameStrings(project),
             frameCount: project.frames?.length || 1,
-            size: project.size,
+            width: project.width,
+            height: project.height,
             updatedAt: serverTimestamp(),
           },
         };
@@ -1068,8 +1130,12 @@ function App() {
     () => allProjects.find((project) => project.id === activeProjectId) || null,
     [allProjects, activeProjectId]
   );
-
-  const activeSize = activeProject?.size || CANVAS_SIZES[0];
+  const activeDimensions = getProjectDimensions(activeProject);
+  const activeWidth = activeDimensions.width;
+  const activeHeight = activeDimensions.height;
+  const activeProjectBucketKey = activeProject
+    ? getProjectBucketKey(activeWidth, activeHeight)
+    : getProjectBucketKey(CANVAS_SIZES[0], CANVAS_SIZES[0]);
 
   const activeFrameIndex = activeProject
     ? Math.min(
@@ -1078,7 +1144,8 @@ function App() {
       )
     : 0;
 
-  const activeFrame = activeProject?.frames?.[activeFrameIndex] || createBlankPixels(activeSize);
+  const activeFrame =
+    activeProject?.frames?.[activeFrameIndex] || createBlankPixels(activeWidth, activeHeight);
   const colorForTool = currentTool === TOOLS.ERASER ? TRANSPARENT : brushColor;
   const displayFrame = useMemo(() => {
     const isPreviewTool = currentTool === TOOLS.LINE || currentTool === TOOLS.SQUARE;
@@ -1088,10 +1155,10 @@ function App() {
 
     const baseIndices =
       currentTool === TOOLS.LINE
-        ? getLineIndices(shapeStartIndex, shapeCurrentIndex, activeSize)
-        : getSquareOutlineIndices(shapeStartIndex, shapeCurrentIndex, activeSize);
+        ? getLineIndices(shapeStartIndex, shapeCurrentIndex, activeWidth)
+        : getSquareOutlineIndices(shapeStartIndex, shapeCurrentIndex, activeWidth);
 
-    const indices = expandIndicesWithThickness(baseIndices, activeSize, toolThickness);
+    const indices = expandIndicesWithThickness(baseIndices, activeWidth, activeHeight, toolThickness);
     const next = [...activeFrame];
     indices.forEach((index) => {
       next[index] = colorForTool;
@@ -1100,7 +1167,8 @@ function App() {
     return next;
   }, [
     activeFrame,
-    activeSize,
+    activeWidth,
+    activeHeight,
     colorForTool,
     currentTool,
     isPainting,
@@ -1117,12 +1185,12 @@ function App() {
       for (let x = 0; x < pendingPaste.width; x += 1) {
         const targetX = pendingPaste.anchorX + x;
         const targetY = pendingPaste.anchorY + y;
-        if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
-        indices.push(toIndex(targetX, targetY, activeSize));
+        if (targetX < 0 || targetX >= activeWidth || targetY < 0 || targetY >= activeHeight) continue;
+        indices.push(toIndex(targetX, targetY, activeWidth));
       }
     }
     return indices;
-  }, [activeProject, activeSize, pendingPaste]);
+  }, [activeProject, activeWidth, activeHeight, pendingPaste]);
 
   const frameWithPendingPaste = useMemo(() => {
     if (!pendingPaste || !activeProject) return displayFrame;
@@ -1132,14 +1200,14 @@ function App() {
       for (let x = 0; x < pendingPaste.width; x += 1) {
         const targetX = pendingPaste.anchorX + x;
         const targetY = pendingPaste.anchorY + y;
-        if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
+        if (targetX < 0 || targetX >= activeWidth || targetY < 0 || targetY >= activeHeight) continue;
         const sourceIndex = y * pendingPaste.width + x;
-        next[toIndex(targetX, targetY, activeSize)] = pendingPaste.pixels[sourceIndex];
+        next[toIndex(targetX, targetY, activeWidth)] = pendingPaste.pixels[sourceIndex];
       }
     }
 
     return next;
-  }, [activeProject, activeSize, displayFrame, pendingPaste]);
+  }, [activeProject, activeWidth, activeHeight, displayFrame, pendingPaste]);
 
   const selectionPreviewIndices = useMemo(() => {
     if (
@@ -1151,8 +1219,8 @@ function App() {
       return [];
     }
 
-    return getRectFillIndices(shapeStartIndex, shapeCurrentIndex, activeSize);
-  }, [activeSize, currentTool, isPainting, shapeStartIndex, shapeCurrentIndex]);
+    return getRectFillIndices(shapeStartIndex, shapeCurrentIndex, activeWidth);
+  }, [activeWidth, currentTool, isPainting, shapeStartIndex, shapeCurrentIndex]);
 
   const visibleSelectionIndices =
     selectionPreviewIndices.length > 0
@@ -1162,7 +1230,7 @@ function App() {
         : selectedIndices;
   const selectedIndexSet = useMemo(() => new Set(visibleSelectionIndices), [visibleSelectionIndices]);
 
-  const getProjectsBySize = (size) => projectsBySize[size] || [];
+  const getProjectsByBucket = (bucketKey) => projectsBySize[bucketKey] || [];
   const cloneState = (value) => {
     if (typeof structuredClone === "function") return structuredClone(value);
     return JSON.parse(JSON.stringify(value));
@@ -1210,7 +1278,7 @@ function App() {
   const updateActiveFrame = (updater) => {
     if (!activeProject) return;
 
-    const updated = getProjectsBySize(activeSize).map((project) => {
+    const updated = getProjectsByBucket(activeProjectBucketKey).map((project) => {
       if (project.id !== activeProject.id) return project;
       const frames = [...project.frames];
       const framePixels = [...frames[activeFrameIndex]];
@@ -1221,12 +1289,12 @@ function App() {
 
     setProjectsBySize((prev) => ({
       ...prev,
-      [activeSize]: updated,
+      [activeProjectBucketKey]: updated,
     }));
   };
 
   const paintPixels = (indices) => {
-    const targetIndices = expandIndicesWithThickness(indices, activeSize, toolThickness);
+    const targetIndices = expandIndicesWithThickness(indices, activeWidth, activeHeight, toolThickness);
 
     updateActiveFrame((framePixels) => {
       const next = [...framePixels];
@@ -1241,22 +1309,22 @@ function App() {
     if (!activeProject) return;
     pushUndoSnapshot();
 
-    const updated = getProjectsBySize(activeSize).map((project) => {
+    const updated = getProjectsByBucket(activeProjectBucketKey).map((project) => {
       if (project.id !== activeProject.id) return project;
       const frames = [...project.frames];
-      frames[activeFrameIndex] = createBlankPixels(project.size);
+      frames[activeFrameIndex] = createBlankPixels(project.width, project.height);
       return { ...project, frames };
     });
 
     setProjectsBySize((prev) => ({
       ...prev,
-      [activeSize]: updated,
+      [activeProjectBucketKey]: updated,
     }));
   };
 
   const clampPendingPasteAnchor = (x, y, width, height) => ({
-    x: Math.max(-width + 1, Math.min(activeSize - 1, x)),
-    y: Math.max(-height + 1, Math.min(activeSize - 1, y)),
+    x: Math.max(-width + 1, Math.min(activeWidth - 1, x)),
+    y: Math.max(-height + 1, Math.min(activeHeight - 1, y)),
   });
 
   const handlePointerDown = (index) => {
@@ -1288,7 +1356,7 @@ function App() {
     setIsPainting(true);
 
     if (currentTool === TOOLS.SELECT && pendingPaste) {
-      const pointer = toXY(index, activeSize);
+      const pointer = toXY(index, activeWidth);
       const isInsidePendingPaste =
         pointer.x >= pendingPaste.anchorX &&
         pointer.x < pendingPaste.anchorX + pendingPaste.width &&
@@ -1315,13 +1383,13 @@ function App() {
 
     if (currentTool === TOOLS.BRUSH || currentTool === TOOLS.ERASER) {
       pushUndoSnapshot();
-      paintPixels(getBrushStampIndices(index, activeSize, toolThickness));
+      paintPixels(getBrushStampIndices(index, activeWidth, activeHeight, toolThickness));
       return;
     }
 
     if (currentTool === TOOLS.BUCKET) {
       pushUndoSnapshot();
-      updateActiveFrame((framePixels) => floodFill(framePixels, index, colorForTool, activeSize));
+      updateActiveFrame((framePixels) => floodFill(framePixels, index, colorForTool, activeWidth, activeHeight));
       setIsPainting(false);
       return;
     }
@@ -1337,7 +1405,7 @@ function App() {
     if (!activeProject) return;
 
     if (pendingPasteDragRef.current && currentTool === TOOLS.SELECT && pendingPaste) {
-      const pointer = toXY(index, activeSize);
+      const pointer = toXY(index, activeWidth);
       const drag = pendingPasteDragRef.current;
       const deltaX = pointer.x - drag.startPointerX;
       const deltaY = pointer.y - drag.startPointerY;
@@ -1362,7 +1430,7 @@ function App() {
     if (!isPainting) return;
 
     if (currentTool === TOOLS.BRUSH || currentTool === TOOLS.ERASER) {
-      paintPixels(getBrushStampIndices(index, activeSize, toolThickness));
+      paintPixels(getBrushStampIndices(index, activeWidth, activeHeight, toolThickness));
       return;
     }
 
@@ -1398,8 +1466,8 @@ function App() {
     if (!activeProject || shapeStartIndex === null) return;
     const baseIndices =
       currentTool === TOOLS.LINE
-        ? getLineIndices(shapeStartIndex, endIndex, activeSize)
-        : getSquareOutlineIndices(shapeStartIndex, endIndex, activeSize);
+        ? getLineIndices(shapeStartIndex, endIndex, activeWidth)
+        : getSquareOutlineIndices(shapeStartIndex, endIndex, activeWidth);
     paintPixels(baseIndices);
   };
 
@@ -1416,7 +1484,7 @@ function App() {
     if (isPainting && currentTool === TOOLS.SELECT) {
       const endIndex = index ?? shapeCurrentIndex ?? shapeStartIndex;
       if (endIndex !== null && shapeStartIndex !== null) {
-        setSelectedIndices(getRectFillIndices(shapeStartIndex, endIndex, activeSize));
+        setSelectedIndices(getRectFillIndices(shapeStartIndex, endIndex, activeWidth));
       }
     }
 
@@ -1452,7 +1520,7 @@ function App() {
     pushUndoSnapshot();
 
     const insertIndex = activeFrameIndex + 1;
-    const updated = getProjectsBySize(activeSize).map((project) => {
+    const updated = getProjectsByBucket(activeProjectBucketKey).map((project) => {
       if (project.id !== activeProject.id) return project;
 
       const frames = [...project.frames];
@@ -1463,7 +1531,7 @@ function App() {
 
     setProjectsBySize((prev) => ({
       ...prev,
-      [activeSize]: updated,
+      [activeProjectBucketKey]: updated,
     }));
     setActiveFrameIndexByProject((prev) => ({
       ...prev,
@@ -1490,7 +1558,7 @@ function App() {
     const currentIndex = activeFrameIndexByProject[projectId] || 0;
     let nextFrameIndex = currentIndex;
 
-    const updated = getProjectsBySize(activeSize).map((project) => {
+    const updated = getProjectsByBucket(activeProjectBucketKey).map((project) => {
       if (project.id !== projectId) return project;
 
       const frames = [...project.frames];
@@ -1506,7 +1574,7 @@ function App() {
       });
 
       if (frames.length <= 0) {
-        frames.push(createBlankPixels(project.size));
+        frames.push(createBlankPixels(project.width, project.height));
         nextFrameIndex = 0;
       } else if (deletedCurrent) {
         const candidate = currentIndex - removedBeforeCurrent;
@@ -1520,7 +1588,7 @@ function App() {
 
     setProjectsBySize((prev) => ({
       ...prev,
-      [activeSize]: updated,
+      [activeProjectBucketKey]: updated,
     }));
     setActiveFrameIndexByProject((prev) => ({
       ...prev,
@@ -1532,8 +1600,8 @@ function App() {
     deleteFrames([frameIndex]);
   };
 
-  const getUniqueName = (size, baseName) => {
-    const names = new Set(getProjectsBySize(size).map((project) => project.name));
+  const getUniqueName = (bucketKey, baseName) => {
+    const names = new Set(getProjectsByBucket(bucketKey).map((project) => project.name));
     let candidate = baseName;
     let suffix = 1;
 
@@ -1546,20 +1614,24 @@ function App() {
   };
 
   const openCreateModal = () => {
-    setNewProjectSize(CANVAS_SIZES[0]);
+    setNewProjectWidth(clampCanvasSize(CANVAS_SIZES[0]));
+    setNewProjectHeight(clampCanvasSize(CANVAS_SIZES[0]));
     setNewProjectName("");
     setIsCreateModalOpen(true);
   };
 
   const createProjectFromModal = () => {
     pushUndoSnapshot();
-    const baseName = newProjectName.trim() || `${newProjectSize} x ${newProjectSize} Pixel File`;
-    const name = getUniqueName(newProjectSize, baseName);
-    const project = createProject(newProjectSize, name);
+    const clampedWidth = clampCanvasSize(newProjectWidth);
+    const clampedHeight = clampCanvasSize(newProjectHeight);
+    const bucketKey = getProjectBucketKey(clampedWidth, clampedHeight);
+    const baseName = newProjectName.trim() || `${clampedWidth} x ${clampedHeight} Pixel File`;
+    const name = getUniqueName(bucketKey, baseName);
+    const project = createProject(clampedWidth, clampedHeight, name);
 
     setProjectsBySize((prev) => ({
       ...prev,
-      [newProjectSize]: [...getProjectsBySize(newProjectSize), project],
+      [bucketKey]: [...getProjectsByBucket(bucketKey), project],
     }));
     setActiveProjectId(project.id);
     setActiveFrameIndexByProject((prev) => ({ ...prev, [project.id]: 0 }));
@@ -1574,9 +1646,9 @@ function App() {
     const nextProjectsBySize = {};
     let deletedProject = null;
 
-    CANVAS_SIZES.forEach((size) => {
-      const currentProjects = getProjectsBySize(size);
-      nextProjectsBySize[size] = currentProjects.filter((project) => {
+    Object.entries(projectsBySize).forEach(([sizeKey, projects]) => {
+      const currentProjects = Array.isArray(projects) ? projects : [];
+      nextProjectsBySize[sizeKey] = currentProjects.filter((project) => {
         if (project.id === projectId) {
           deletedProject = project;
           return false;
@@ -1890,13 +1962,13 @@ function App() {
   const getSelectionBounds = (indices) => {
     if (!indices || indices.length === 0) return null;
 
-    let minX = activeSize;
-    let minY = activeSize;
+    let minX = activeWidth;
+    let minY = activeHeight;
     let maxX = 0;
     let maxY = 0;
 
     indices.forEach((index) => {
-      const { x, y } = toXY(index, activeSize);
+      const { x, y } = toXY(index, activeWidth);
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
@@ -1927,7 +1999,7 @@ function App() {
 
     for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
       for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-        pixels.push(activeFrame[toIndex(x, y, activeSize)]);
+        pixels.push(activeFrame[toIndex(x, y, activeWidth)]);
       }
     }
 
@@ -1938,7 +2010,7 @@ function App() {
     if (!activeProject || !clipboard) return;
 
     const anchorIndex = lastPointerIndex ?? selectedIndices[0] ?? 0;
-    const anchor = toXY(anchorIndex, activeSize);
+    const anchor = toXY(anchorIndex, activeWidth);
     const clampedAnchor = clampPendingPasteAnchor(anchor.x, anchor.y, clipboard.width, clipboard.height);
 
     setPendingPaste({
@@ -1962,9 +2034,9 @@ function App() {
         for (let x = 0; x < pendingPaste.width; x += 1) {
           const targetX = pendingPaste.anchorX + x;
           const targetY = pendingPaste.anchorY + y;
-          if (targetX < 0 || targetX >= activeSize || targetY < 0 || targetY >= activeSize) continue;
+          if (targetX < 0 || targetX >= activeWidth || targetY < 0 || targetY >= activeHeight) continue;
           const sourceIndex = y * pendingPaste.width + x;
-          next[toIndex(targetX, targetY, activeSize)] = pendingPaste.pixels[sourceIndex];
+          next[toIndex(targetX, targetY, activeWidth)] = pendingPaste.pixels[sourceIndex];
         }
       }
 
@@ -2062,7 +2134,8 @@ function App() {
           ownerUid: authUser.uid,
           authorName: authUser.displayName || authUser.email || "Anonymous",
           name: project.name,
-          size: project.size,
+          width: project.width,
+          height: project.height,
           frameCount: project.frames?.length || 1,
           previewPixels: getProjectPreviewPixels(project),
           previewFrameStrings: getProjectPreviewFrameStrings(project),
@@ -2516,8 +2589,10 @@ function App() {
         isOpen={isCreateModalOpen}
         newProjectName={newProjectName}
         setNewProjectName={setNewProjectName}
-        newProjectSize={newProjectSize}
-        setNewProjectSize={setNewProjectSize}
+        newProjectWidth={newProjectWidth}
+        setNewProjectWidth={setNewProjectWidth}
+        newProjectHeight={newProjectHeight}
+        setNewProjectHeight={setNewProjectHeight}
         onClose={() => setIsCreateModalOpen(false)}
         onCreate={createProjectFromModal}
       />

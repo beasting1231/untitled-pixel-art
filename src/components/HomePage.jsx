@@ -3,40 +3,38 @@ import { ArrowRight, Flame, Heart, Sparkles, Trash2, Upload } from "lucide-react
 
 const PREVIEW_FPS = 6;
 
-const buildFallbackFrame = (size) =>
-  Array.from({ length: size * size }, (_, index) => {
-    const x = index % size;
-    const y = Math.floor(index / size);
+const buildFallbackFrame = (width, height) =>
+  Array.from({ length: width * height }, (_, index) => {
+    const x = index % width;
+    const y = Math.floor(index / width);
     return (x + y) % 2 === 0 ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.08)";
   });
 
-const normalizeFrame = (frame, size) => {
-  const expectedLength = size * size;
-  if (!Array.isArray(frame)) return buildFallbackFrame(size);
+const normalizeFrame = (frame, width, height) => {
+  const expectedLength = width * height;
+  if (!Array.isArray(frame)) return buildFallbackFrame(width, height);
   return Array.from({ length: expectedLength }, (_, index) => frame[index] || "transparent");
 };
 
 const getPreviewMeta = (project) => {
-  const defaultSize = Math.max(1, Number(project?.size) || 16);
+  const defaultWidth = Math.max(1, Number(project?.width) || Number(project?.size) || 16);
+  const defaultHeight = Math.max(1, Number(project?.height) || Number(project?.size) || 16);
   const rawFrames = Array.isArray(project?.previewFrames)
     ? project.previewFrames.filter((frame) => Array.isArray(frame))
     : [];
   const rawPixels = Array.isArray(project?.previewPixels) ? project.previewPixels : [];
-  const inferredSizeFromPixels = Math.round(Math.sqrt(rawPixels.length || 0));
-  const inferredSizeFromFrames = rawFrames[0] ? Math.round(Math.sqrt(rawFrames[0].length || 0)) : 0;
-  const inferredSize =
-    inferredSizeFromFrames > 1 ? inferredSizeFromFrames : inferredSizeFromPixels > 1 ? inferredSizeFromPixels : 0;
-  const size = inferredSize || defaultSize;
+  const width = defaultWidth;
+  const height = defaultHeight;
 
   if (rawFrames.length > 0) {
-    return { size, frames: rawFrames.map((frame) => normalizeFrame(frame, size)) };
+    return { width, height, frames: rawFrames.map((frame) => normalizeFrame(frame, width, height)) };
   }
 
   if (rawPixels.length > 0) {
-    return { size, frames: [normalizeFrame(rawPixels, size)] };
+    return { width, height, frames: [normalizeFrame(rawPixels, width, height)] };
   }
 
-  return { size, frames: [buildFallbackFrame(size)] };
+  return { width, height, frames: [buildFallbackFrame(width, height)] };
 };
 
 function PixelPreview({ project, previewKey }) {
@@ -62,19 +60,20 @@ function PixelPreview({ project, previewKey }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const size = preview.size;
+    const width = preview.width;
+    const height = preview.height;
     const frame = preview.frames[frameIndex] || preview.frames[0] || [];
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = width;
+    canvas.height = height;
 
     const context = canvas.getContext("2d");
     if (!context) return;
-    context.clearRect(0, 0, size, size);
+    context.clearRect(0, 0, width, height);
 
     frame.forEach((color, index) => {
       if (!color || color === "transparent") return;
-      const x = index % size;
-      const y = Math.floor(index / size);
+      const x = index % width;
+      const y = Math.floor(index / width);
       context.fillStyle = color;
       context.fillRect(x, y, 1, 1);
     });
@@ -142,11 +141,14 @@ function HomePage({
               {projects.map((project) => {
                 return (
                   <article key={project.id} className="home-project-card" role="listitem">
-                    <PixelPreview project={{ size: project.size, previewFrames: project.frames || [] }} previewKey={project.id} />
+                    <PixelPreview
+                      project={{ width: project.width, height: project.height, previewFrames: project.frames || [] }}
+                      previewKey={project.id}
+                    />
 
                     <div>
                       <p className="home-card-eyebrow">
-                        {project.size} x {project.size}
+                        {project.width} x {project.height}
                       </p>
                       <h3>{project.name}</h3>
                       <p>{project.frames?.length || 1} frame{(project.frames?.length || 1) === 1 ? "" : "s"}</p>
@@ -212,7 +214,7 @@ function HomePage({
 
                   <div>
                     <p className="home-card-eyebrow">
-                      #{index + 1} · {project.size} x {project.size}
+                      #{index + 1} · {project.width} x {project.height}
                     </p>
                     <h3>{project.name}</h3>
                     <p>
