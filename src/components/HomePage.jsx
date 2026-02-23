@@ -101,6 +101,10 @@ function HomePage({
   communityLoading,
   communityError,
   onToggleUpvote,
+  isAuthenticated,
+  onSignIn,
+  onSignOut,
+  authError,
 }) {
   const [projectPendingDelete, setProjectPendingDelete] = useState(null);
   const firstName = authUser?.displayName?.trim()?.split(/\s+/)?.[0] || "Creator";
@@ -150,6 +154,9 @@ function HomePage({
               <p>Recent files ready for edits and publishing.</p>
             </div>
             <div className="home-actions">
+              <button className="ghost-button" onClick={isAuthenticated ? onSignOut : onSignIn}>
+                {isAuthenticated ? "Sign out" : "Sign in"}
+              </button>
               <button className="primary-button" onClick={onCreateProject}>
                 New project
               </button>
@@ -158,6 +165,7 @@ function HomePage({
               </button>
             </div>
           </div>
+          {authError ? <p className="auth-error">{authError}</p> : null}
 
           {projects.length > 0 ? (
             <div className="projects-strip" role="list" aria-label="Your projects">
@@ -187,10 +195,16 @@ function HomePage({
                       <button
                         className="ghost-button"
                         onClick={() => onPublishProject(project)}
-                        disabled={publishingProjectId === project.id || publishedProjectIds?.has(project.id)}
+                        disabled={
+                          !isAuthenticated ||
+                          publishingProjectId === project.id ||
+                          publishedProjectIds?.has(project.id)
+                        }
                       >
                         <Upload size={14} aria-hidden="true" />
-                        {publishingProjectId === project.id
+                        {!isAuthenticated
+                          ? "Sign in to publish"
+                          : publishingProjectId === project.id
                           ? "Publishing..."
                           : publishedProjectIds?.has(project.id)
                             ? "Published"
@@ -252,6 +266,8 @@ function HomePage({
                     <button
                       className={`community-upvote ${project.hasUpvoted ? "active" : ""}`}
                       onClick={() => onToggleUpvote(project.id)}
+                      disabled={!isAuthenticated}
+                      title={isAuthenticated ? "Upvote project" : "Sign in to upvote"}
                     >
                       <Heart size={14} aria-hidden="true" /> {project.upvotes}
                     </button>

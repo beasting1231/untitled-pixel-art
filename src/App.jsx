@@ -20,7 +20,6 @@ import CreateFileModal from "./components/CreateFileModal";
 import EditorPanel from "./components/EditorPanel";
 import HomePage from "./components/HomePage";
 import IconActionButton from "./components/IconActionButton";
-import { Button } from "./components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { auth, db } from "./lib/firebase";
 import {
@@ -429,9 +428,10 @@ const prepareStateForStorage = (state) => {
   };
 };
 
-const normalizeProjectsBySize = (value) => {
+const normalizeProjectsBySize = (value, legacyCustomPalette = null) => {
   const normalized = createEmptyProjectsBySize();
   if (!value || typeof value !== "object") return normalized;
+  const fallbackCustomPalette = normalizeCustomPalette(legacyCustomPalette);
 
   getProjectBucketKeys(value).forEach((bucketKey) => {
     const bucketDimensions = getProjectDimensionsFromBucketKey(bucketKey);
@@ -472,6 +472,9 @@ const normalizeProjectsBySize = (value) => {
           width,
           height,
           frames: frames.length > 0 ? frames : [createBlankPixels(width, height)],
+          customPalette: normalizeCustomPalette(
+            Array.isArray(project.customPalette) ? project.customPalette : fallbackCustomPalette
+          ),
         };
       });
   });
@@ -652,7 +655,6 @@ function App() {
   const [isEyedropperArmed, setIsEyedropperArmed] = useState(false);
   const [isColorMenuPinnedOpen, setIsColorMenuPinnedOpen] = useState(false);
   const [eyedropperPreview, setEyedropperPreview] = useState(null);
-  const [customPalette, setCustomPalette] = useState(() => normalizeCustomPalette());
   const [currentTool, setCurrentTool] = useState(TOOLS.BRUSH);
   const [toolThickness, setToolThickness] = useState(1);
   const [shapeStartIndex, setShapeStartIndex] = useState(null);
@@ -688,6 +690,11 @@ function App() {
   const undoStackRef = useRef([]);
   const pendingPasteDragRef = useRef(null);
   const lastAuthenticatedUidRef = useRef(null);
+  const projectsBySizeRef = useRef(projectsBySize);
+
+  useEffect(() => {
+    projectsBySizeRef.current = projectsBySize;
+  }, [projectsBySize]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -723,11 +730,34 @@ function App() {
       setPendingPaste(null);
       pendingPasteDragRef.current = null;
       setReferenceOverlayByProject({});
-      setHasHydrated(false);
-      setSavedSnapshot("");
+      const defaultState = {
+        projectsBySize: createEmptyProjectsBySize(),
+        activeProjectId: null,
+        activeFrameIndexByProject: {},
+        palette: BASE_PALETTE,
+        brushColor: BASE_PALETTE[0],
+        pickerColor: BASE_PALETTE[0],
+        currentTool: TOOLS.BRUSH,
+        toolThickness: 1,
+        fps: 8,
+        isGridVisible: true,
+      };
+      setProjectsBySize(defaultState.projectsBySize);
+      setActiveProjectId(defaultState.activeProjectId);
+      setActiveFrameIndexByProject(defaultState.activeFrameIndexByProject);
+      setPalette(defaultState.palette);
+      setBrushColor(defaultState.brushColor);
+      setPickerColor(defaultState.pickerColor);
+      setCurrentTool(defaultState.currentTool);
+      setToolThickness(defaultState.toolThickness);
+      setFps(defaultState.fps);
+      setIsAnimationPanelOpen(false);
+      setIsGridVisible(defaultState.isGridVisible);
+      setSavedSnapshot(JSON.stringify(defaultState));
       setHasUnsavedChanges(false);
       setIsSaving(false);
-      setSaveState("idle");
+      setSaveState("saved");
+      setHasHydrated(true);
       return;
     }
 
@@ -749,7 +779,7 @@ function App() {
 
     const applyPersistedState = (state) => {
       if (!state || isCancelled) return;
-      const nextProjectsBySize = normalizeProjectsBySize(state.projectsBySize);
+      const nextProjectsBySize = normalizeProjectsBySize(state.projectsBySize, state.customPalette);
       const allLoadedProjects = Object.values(nextProjectsBySize).flat();
       const loadedProjectIds = new Set(allLoadedProjects.map((project) => project.id));
       const loadedActiveProjectId =
@@ -767,7 +797,6 @@ function App() {
       setPalette(Array.isArray(state.palette) ? state.palette : BASE_PALETTE);
       setBrushColor(typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0]);
       setPickerColor(typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0]);
-      setCustomPalette(normalizeCustomPalette(state.customPalette));
       setCurrentTool(Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH);
       setToolThickness(clampBrushSize(state.toolThickness));
       setFps(Math.max(1, Math.min(60, Number(state.fps) || 8)));
@@ -784,7 +813,6 @@ function App() {
         palette: Array.isArray(state.palette) ? state.palette : BASE_PALETTE,
         brushColor: typeof state.brushColor === "string" ? state.brushColor : BASE_PALETTE[0],
         pickerColor: typeof state.pickerColor === "string" ? state.pickerColor : BASE_PALETTE[0],
-        customPalette: normalizeCustomPalette(state.customPalette),
         currentTool: Object.values(TOOLS).includes(state.currentTool) ? state.currentTool : TOOLS.BRUSH,
         toolThickness: clampBrushSize(state.toolThickness),
         fps: Math.max(1, Math.min(60, Number(state.fps) || 8)),
@@ -846,7 +874,6 @@ function App() {
           palette: BASE_PALETTE,
           brushColor: BASE_PALETTE[0],
           pickerColor: BASE_PALETTE[0],
-          customPalette: normalizeCustomPalette(),
           currentTool: TOOLS.BRUSH,
           toolThickness: 1,
           fps: 8,
@@ -915,16 +942,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!authUser?.uid) {
-      setCommunityProjects([]);
-      setPublishedProjectIds(new Set());
-      setProjectCommunityLikes({});
-      setMissingPreviewProjectIds(new Set());
-      setCommunityError("");
-      setCommunityLoading(false);
-      return;
-    }
-
+    const currentUid = authUser?.uid || "";
     let isCancelled = false;
     setCommunityLoading(true);
     setCommunityError("");
@@ -936,15 +954,20 @@ function App() {
           orderBy("upvotes", "desc"),
           limit(50)
         );
-        const ownPublishedQuery = query(
-          collection(db, COMMUNITY_COLLECTION),
-          where("ownerUid", "==", authUser.uid),
-          limit(100)
-        );
+        const communitySnapshotPromise = getDocs(communityQuery);
+        const ownSnapshotPromise = currentUid
+          ? getDocs(
+              query(
+                collection(db, COMMUNITY_COLLECTION),
+                where("ownerUid", "==", currentUid),
+                limit(100)
+              )
+            )
+          : Promise.resolve(null);
 
         const [communitySnapshot, ownSnapshot] = await Promise.all([
-          getDocs(communityQuery),
-          getDocs(ownPublishedQuery),
+          communitySnapshotPromise,
+          ownSnapshotPromise,
         ]);
 
         if (isCancelled) return;
@@ -966,36 +989,38 @@ function App() {
               previewPixels: Array.isArray(data.previewPixels) ? data.previewPixels : [],
               previewFrames: parsePreviewFrameStrings(data.previewFrameStrings),
               upvotes: Math.max(0, Number(data.upvotes) || 0),
-              hasUpvoted: upvoterIds.includes(authUser.uid),
+              hasUpvoted: currentUid ? upvoterIds.includes(currentUid) : false,
             };
           })
-          .filter((project) => project.ownerUid && project.ownerUid !== authUser.uid)
+          .filter((project) => project.ownerUid && (!currentUid || project.ownerUid !== currentUid))
           .sort((a, b) => b.upvotes - a.upvotes);
 
         const ownedIds = new Set();
         const likesByProjectId = {};
         const missingPreviewIds = new Set();
-        ownSnapshot.docs.forEach((docSnapshot) => {
-          const rawId = docSnapshot.id || "";
-          const prefix = `${authUser.uid}_`;
-          if (rawId.startsWith(prefix)) {
-            const projectId = rawId.slice(prefix.length);
-            ownedIds.add(projectId);
-            const data = docSnapshot.data() || {};
-            likesByProjectId[projectId] = Math.max(0, Number(data.upvotes) || 0);
-            const frameCount = Math.max(1, Number(data.frameCount) || 1);
-            const hasPreviewPixels = Array.isArray(data.previewPixels) && data.previewPixels.length > 0;
-            const hasAnimatedPreviewFrames =
-              Array.isArray(data.previewFrameStrings) &&
-              data.previewFrameStrings.filter((entry) => typeof entry === "string").length >= 2;
-            const needsStaticPreview = !hasPreviewPixels;
-            const needsAnimatedPreview = frameCount > 1 && !hasAnimatedPreviewFrames;
+        if (ownSnapshot) {
+          ownSnapshot.docs.forEach((docSnapshot) => {
+            const rawId = docSnapshot.id || "";
+            const prefix = `${currentUid}_`;
+            if (rawId.startsWith(prefix)) {
+              const projectId = rawId.slice(prefix.length);
+              ownedIds.add(projectId);
+              const data = docSnapshot.data() || {};
+              likesByProjectId[projectId] = Math.max(0, Number(data.upvotes) || 0);
+              const frameCount = Math.max(1, Number(data.frameCount) || 1);
+              const hasPreviewPixels = Array.isArray(data.previewPixels) && data.previewPixels.length > 0;
+              const hasAnimatedPreviewFrames =
+                Array.isArray(data.previewFrameStrings) &&
+                data.previewFrameStrings.filter((entry) => typeof entry === "string").length >= 2;
+              const needsStaticPreview = !hasPreviewPixels;
+              const needsAnimatedPreview = frameCount > 1 && !hasAnimatedPreviewFrames;
 
-            if (needsStaticPreview || needsAnimatedPreview) {
-              missingPreviewIds.add(projectId);
+              if (needsStaticPreview || needsAnimatedPreview) {
+                missingPreviewIds.add(projectId);
+              }
             }
-          }
-        });
+          });
+        }
 
         setCommunityProjects(nextProjects);
         setPublishedProjectIds(ownedIds);
@@ -1017,7 +1042,7 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [authUser]);
+  }, [authUser?.uid]);
 
   const allProjects = useMemo(() => Object.values(projectsBySize).flat(), [projectsBySize]);
 
@@ -1067,24 +1092,22 @@ function App() {
       palette,
       brushColor,
       pickerColor,
-      customPalette,
       currentTool,
       toolThickness,
       fps,
       isGridVisible,
     }),
     [
-    projectsBySize,
-    activeProjectId,
-    activeFrameIndexByProject,
-    palette,
-    brushColor,
-    pickerColor,
-    customPalette,
-    currentTool,
-    toolThickness,
-    fps,
-    isGridVisible,
+      projectsBySize,
+      activeProjectId,
+      activeFrameIndexByProject,
+      palette,
+      brushColor,
+      pickerColor,
+      currentTool,
+      toolThickness,
+      fps,
+      isGridVisible,
     ]
   );
 
@@ -1125,28 +1148,6 @@ function App() {
     }
   }, [hasHydrated, hasUnsavedChanges, isSaving]);
 
-  useEffect(() => {
-    if (!authUser?.uid || !hasHydrated) return;
-
-    const timer = window.setTimeout(() => {
-      setDoc(
-        getUserStateRef(authUser.uid),
-        {
-          version: STORAGE_VERSION,
-          state: {
-            customPalette,
-          },
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      ).catch(() => {
-        // Best-effort autosave for custom palette slots.
-      });
-    }, 180);
-
-    return () => window.clearTimeout(timer);
-  }, [authUser, hasHydrated, customPalette]);
-
   const saveChanges = async () => {
     if (!authUser?.uid || !hasHydrated || isSaving || !hasUnsavedChanges) return;
 
@@ -1175,6 +1176,31 @@ function App() {
     () => allProjects.find((project) => project.id === activeProjectId) || null,
     [allProjects, activeProjectId]
   );
+  const activeCustomPalette = useMemo(
+    () => normalizeCustomPalette(activeProject?.customPalette),
+    [activeProject?.customPalette]
+  );
+  useEffect(() => {
+    if (!authUser?.uid || !hasHydrated || !activeProject?.id) return;
+
+    const timer = window.setTimeout(() => {
+      setDoc(
+        getUserStateRef(authUser.uid),
+        {
+          version: STORAGE_VERSION,
+          state: {
+            projectsBySize: prepareStateForStorage({ projectsBySize: projectsBySizeRef.current }).projectsBySize,
+          },
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      ).catch(() => {
+        // Best-effort autosave for the active project's custom palette slots.
+      });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [authUser, hasHydrated, activeProject?.id, activeProject?.customPalette]);
   const activeDimensions = getProjectDimensions(activeProject);
   const activeWidth = activeDimensions.width;
   const activeHeight = activeDimensions.height;
@@ -1672,7 +1698,10 @@ function App() {
     const bucketKey = getProjectBucketKey(clampedWidth, clampedHeight);
     const baseName = newProjectName.trim() || `${clampedWidth} x ${clampedHeight} Pixel File`;
     const name = getUniqueName(bucketKey, baseName);
-    const project = createProject(clampedWidth, clampedHeight, name);
+    const project = {
+      ...createProject(clampedWidth, clampedHeight, name),
+      customPalette: normalizeCustomPalette(),
+    };
 
     setProjectsBySize((prev) => ({
       ...prev,
@@ -1989,18 +2018,34 @@ function App() {
   };
 
   const handleCustomPaletteSlotClick = (slotIndex) => {
-    const slotColor = customPalette[slotIndex];
+    if (!activeProject) return;
+
+    const slotColor = activeCustomPalette[slotIndex];
     if (slotColor) {
       handleSelectColor(slotColor);
       return;
     }
 
-    setCustomPalette((prev) => {
-      const next = prev.map((entry, index) => (index === slotIndex ? pickerColor : entry));
-      if (next.every((entry) => entry !== null)) {
-        return [...next, ...Array.from({ length: CUSTOM_PALETTE_SLOTS }, () => null)];
-      }
-      return next;
+    setProjectsBySize((prev) => {
+      const bucketProjects = prev[activeProjectBucketKey] || [];
+      const nextBucketProjects = bucketProjects.map((project) => {
+        if (project.id !== activeProject.id) return project;
+        const nextCustomPalette = normalizeCustomPalette(project.customPalette).map((entry, index) =>
+          index === slotIndex ? pickerColor : entry
+        );
+        if (nextCustomPalette.every((entry) => entry !== null)) {
+          nextCustomPalette.push(...Array.from({ length: CUSTOM_PALETTE_SLOTS }, () => null));
+        }
+        return {
+          ...project,
+          customPalette: nextCustomPalette,
+        };
+      });
+
+      return {
+        ...prev,
+        [activeProjectBucketKey]: nextBucketProjects,
+      };
     });
   };
 
@@ -2101,7 +2146,7 @@ function App() {
     };
 
     const onKeyDown = (event) => {
-      if (!authUser || isEditableTarget(event.target)) return;
+      if (isEditableTarget(event.target)) return;
 
       if (event.key === "Enter" && pendingPaste) {
         event.preventDefault();
@@ -2140,7 +2185,7 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [authUser, commitPendingPaste, copySelection, pasteClipboard, pendingPaste]);
+  }, [commitPendingPaste, copySelection, pasteClipboard, pendingPaste]);
 
   const signInWithGoogle = async () => {
     try {
@@ -2287,30 +2332,6 @@ function App() {
     );
   }
 
-  if (!authUser) {
-    return (
-      <main className="app-shell auth-stone-shell">
-        <section className="auth-stone-wrap">
-          <Card className="auth-stone-card">
-            <CardHeader className="auth-stone-header">
-              <p className="auth-stone-kicker">Pixel Forge</p>
-              <CardTitle>Sign in to continue</CardTitle>
-              <CardDescription>
-                Access your projects, community likes, and autosaved pixel sessions.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="auth-stone-content">
-              <Button className="auth-stone-button" onClick={signInWithGoogle}>
-                Continue with Google
-              </Button>
-              {authError ? <p className="auth-error">{authError}</p> : null}
-            </CardContent>
-          </Card>
-        </section>
-      </main>
-    );
-  }
-
   return (
     <main className="app-shell">
       {currentView === "home" ? (
@@ -2333,6 +2354,10 @@ function App() {
           communityLoading={communityLoading}
           communityError={communityError}
           onToggleUpvote={toggleCommunityUpvote}
+          isAuthenticated={Boolean(authUser?.uid)}
+          onSignIn={signInWithGoogle}
+          onSignOut={handleLogout}
+          authError={authError}
         />
       ) : (
         <div className="workspace">
@@ -2485,7 +2510,7 @@ function App() {
                 </div>
                 <span className="icon-action-custom-label icon-action-custom-palette-label">Custom pallete</span>
                 <div className="icon-action-custom-grid">
-                  {customPalette.map((color, index) => (
+                  {activeCustomPalette.map((color, index) => (
                     <button
                       key={`custom-color-slot-${index}`}
                       type="button"
@@ -2572,7 +2597,7 @@ function App() {
               className={saveState === "saved" ? "save-success" : ""}
               title={isSaving ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
               ariaLabel={isSaving ? "Saving..." : saveState === "saved" ? "Saved" : "Save"}
-              disabled={isSaving || !hasUnsavedChanges}
+              disabled={isSaving || !hasUnsavedChanges || !authUser?.uid}
               onClick={() => void saveChanges()}
             />
           </div>
