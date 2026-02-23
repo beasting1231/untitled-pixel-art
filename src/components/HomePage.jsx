@@ -103,6 +103,9 @@ function HomePage({
   onToggleUpvote,
 }) {
   const [projectPendingDelete, setProjectPendingDelete] = useState(null);
+  const firstName = authUser?.displayName?.trim()?.split(/\s+/)?.[0] || "Creator";
+  const totalFrames = projects.reduce((sum, project) => sum + Math.max(1, project.frames?.length || 1), 0);
+  const publishedCount = publishedProjectIds?.size || 0;
 
   const requestDelete = (project) => {
     setProjectPendingDelete(project);
@@ -118,14 +121,34 @@ function HomePage({
     <>
       <section className="home-shell panel">
         <div className="home-hero">
-          <p className="eyebrow">Home</p>
-          <h1>{authUser?.displayName ? `Welcome, ${authUser.displayName.split(" ")[0]}` : "Welcome back"}</h1>
-          <p className="subtitle">Jump into your projects or explore what the community is building.</p>
+          <div className="home-hero-copy">
+            <p className="eyebrow">Workspace</p>
+            <h1>Welcome back, {firstName}</h1>
+            <p className="subtitle">Jump into your files or explore what the community is building.</p>
+          </div>
+
+          <div className="home-hero-stats" role="list" aria-label="Workspace stats">
+            <div className="home-hero-stat" role="listitem">
+              <p className="home-hero-stat-value">{projects.length}</p>
+              <p className="home-hero-stat-label">Projects</p>
+            </div>
+            <div className="home-hero-stat" role="listitem">
+              <p className="home-hero-stat-value">{totalFrames}</p>
+              <p className="home-hero-stat-label">Frames</p>
+            </div>
+            <div className="home-hero-stat" role="listitem">
+              <p className="home-hero-stat-value">{publishedCount}</p>
+              <p className="home-hero-stat-label">Published</p>
+            </div>
+          </div>
         </div>
 
         <section className="home-section">
           <div className="home-section-header">
-            <h2 className="panel-title">Your Projects</h2>
+            <div className="home-section-headline">
+              <h2 className="panel-title">Your Projects</h2>
+              <p>Recent files ready for edits and publishing.</p>
+            </div>
             <div className="home-actions">
               <button className="primary-button" onClick={onCreateProject}>
                 New project
@@ -192,8 +215,10 @@ function HomePage({
 
         <section className="home-section community-section">
           <div className="home-section-header">
-            <h2 className="panel-title">Community</h2>
-            <p className="home-helper-copy">Sorted by upvotes so popular projects rise to the top.</p>
+            <div className="home-section-headline">
+              <h2 className="panel-title">Community</h2>
+              <p className="home-helper-copy">Sorted by upvotes so popular projects rise to the top.</p>
+            </div>
           </div>
 
           {communityLoading ? <p className="subtitle">Loading community projects...</p> : null}

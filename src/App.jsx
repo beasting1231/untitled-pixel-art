@@ -20,6 +20,8 @@ import CreateFileModal from "./components/CreateFileModal";
 import EditorPanel from "./components/EditorPanel";
 import HomePage from "./components/HomePage";
 import IconActionButton from "./components/IconActionButton";
+import { Button } from "./components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { auth, db } from "./lib/firebase";
 import {
   Check,
@@ -63,6 +65,8 @@ const TOOLS = {
 
 const STORAGE_VERSION = 1;
 const STORAGE_KEY_PREFIX = "pixel-forge-state";
+const VIEW_STORAGE_KEY_PREFIX = "pixel-forge-view";
+const AUTH_TAB_SESSION_KEY = "pixel-forge-auth-tab";
 const COMMUNITY_COLLECTION = "communityProjects";
 const MAX_COMMUNITY_PREVIEW_FRAMES = 12;
 const MIN_BRUSH_SIZE = 1;
@@ -82,6 +86,8 @@ const DEFAULT_REFERENCE_TRANSFORM = {
 const toXY = (index, width) => ({ x: index % width, y: Math.floor(index / width) });
 const toIndex = (x, y, width) => y * width + x;
 const getStorageKey = (uid) => `${STORAGE_KEY_PREFIX}:${uid}`;
+const getViewStorageKey = (uid) => `${VIEW_STORAGE_KEY_PREFIX}:${uid}`;
+const normalizeView = (view) => (view === "editor" ? "editor" : "home");
 const getUserStateRef = (uid) => doc(db, "users", uid, "editorState", "pixelForge");
 const getProjectPreviewPixels = (project) =>
   Array.isArray(project?.frames?.[0]) ? project.frames[0] : [];
@@ -681,6 +687,7 @@ function App() {
   const customSvAreaRef = useRef(null);
   const undoStackRef = useRef([]);
   const pendingPasteDragRef = useRef(null);
+  const lastAuthenticatedUidRef = useRef(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -692,7 +699,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (authLoading) return;
+
     if (!authUser?.uid) {
+      const lastAuthenticatedUid = lastAuthenticatedUidRef.current;
+      if (lastAuthenticatedUid) {
+        try {
+          sessionStorage.removeItem(getViewStorageKey(lastAuthenticatedUid));
+        } catch (_error) {
+          // Ignore session storage cleanup errors.
+        }
+      }
+      try {
+        sessionStorage.removeItem(AUTH_TAB_SESSION_KEY);
+      } catch (_error) {
+        // Ignore session storage cleanup errors.
+      }
+      lastAuthenticatedUidRef.current = null;
       setCurrentView("home");
       undoStackRef.current = [];
       setSelectedIndices([]);
@@ -708,7 +731,20 @@ function App() {
       return;
     }
 
-    setCurrentView("home");
+    lastAuthenticatedUidRef.current = authUser.uid;
+    let shouldRestoreView = false;
+    let initialView = "home";
+    try {
+      shouldRestoreView = sessionStorage.getItem(AUTH_TAB_SESSION_KEY) === authUser.uid;
+      if (shouldRestoreView) {
+        initialView = normalizeView(sessionStorage.getItem(getViewStorageKey(authUser.uid)));
+      }
+      sessionStorage.setItem(AUTH_TAB_SESSION_KEY, authUser.uid);
+    } catch (_error) {
+      // Ignore session storage access errors and fallback to home.
+    }
+
+    setCurrentView(shouldRestoreView ? initialView : "home");
     let isCancelled = false;
 
     const applyPersistedState = (state) => {
@@ -830,7 +866,16 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [authUser]);
+  }, [authLoading, authUser]);
+
+  useEffect(() => {
+    if (!authUser?.uid) return;
+    try {
+      sessionStorage.setItem(getViewStorageKey(authUser.uid), normalizeView(currentView));
+    } catch (_error) {
+      // Ignore session storage write errors.
+    }
+  }, [authUser, currentView]);
 
   useEffect(() => {
     const onWheel = (event) => {
@@ -2222,33 +2267,53 @@ function App() {
 
   if (authLoading) {
     return (
-      <main className="app-shell">
-        <div className="auth-card">
-          <h1>Loading</h1>
-        </div>
+      <main className="app-shell auth-stone-shell">
+        <section className="auth-stone-wrap">
+          <Card className="auth-stone-card">
+            <CardHeader className="auth-stone-header">
+              <p className="auth-stone-kicker">Pixel Forge</p>
+              <CardTitle>Preparing your studio</CardTitle>
+              <CardDescription>Checking your account session.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="auth-stone-loading">
+                <Loader2 size={18} aria-hidden="true" className="icon-action-spinner" />
+                <span>Loading</span>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
       </main>
     );
   }
 
   if (!authUser) {
     return (
-      <main className="app-shell">
-        <div className="auth-card">
-          <p className="eyebrow">Pixel Forge</p>
-          <h1>Sign in required</h1>
-          <p className="subtitle">Please sign in before using the pixel editor.</p>
-          <button className="primary-button auth-button" onClick={signInWithGoogle}>
-            Continue with Google
-          </button>
-          {authError && <p className="auth-error">{authError}</p>}
-        </div>
+      <main className="app-shell auth-stone-shell">
+        <section className="auth-stone-wrap">
+          <Card className="auth-stone-card">
+            <CardHeader className="auth-stone-header">
+              <p className="auth-stone-kicker">Pixel Forge</p>
+              <CardTitle>Sign in to continue</CardTitle>
+              <CardDescription>
+                Access your projects, community likes, and autosaved pixel sessions.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="auth-stone-content">
+              <Button className="auth-stone-button" onClick={signInWithGoogle}>
+                Continue with Google
+              </Button>
+              {authError ? <p className="auth-error">{authError}</p> : null}
+            </CardContent>
+          </Card>
+        </section>
       </main>
     );
   }
 
   return (
     <main className="app-shell">
-      {(currentView === "home" && !activeProject) ? (
+      {currentView === "home" ? (
         <HomePage
           authUser={authUser}
           projects={allProjects}
